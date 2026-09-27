@@ -31,6 +31,9 @@ back to those explanations instead of duplicating every full function body.
 14. [Mock Interview](13-mock-interview.md)
 15. [Common Mistakes](14-common-mistakes.md)
 16. [Final Cheat Sheet](15-final-cheat-sheet.md)
+17. [Complete Project and Interview Summary](16-complete-interview-summary.md)
+18. [Interview Rubric Mastery Workbook](17-interview-rubric-mastery.md)
+19. [Quiz Quick Reference](18-quiz-quick-reference.md)
 
 ## How to study
 
@@ -39,6 +42,12 @@ back to those explanations instead of duplicating every full function body.
 - Second pass: chapters 4, 5, and 7 with the source files open.
 - Third pass: answer chapter 12 without notes, then practice chapter 13 aloud.
 - Final review: chapters 14 and 15.
+- Standalone interview preparation: chapter 16 combines the entire project,
+  high-level method explanations, execution traces, and model answers.
+- Rubric practice: chapter 17 trains detailed implementation explanation,
+  design alternatives, debugging, modifications, and consequence prediction.
+- During a notes-allowed quiz: use chapter 18 for fast definitions, flows, and
+  likely short-answer prompts.
 
 The specification remains authoritative. When this guide discusses a design
 limitation, it distinguishes “correct for this assignment” from “what a
