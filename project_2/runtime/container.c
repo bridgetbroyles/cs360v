@@ -1,14 +1,6 @@
 /* container.c: student implementation of the Project 2 container runtime.
  *
- * Quick map of this file
- * - report_errno(): prints a consistently prefixed system-call error.
- * - format_path(): builds a path and rejects truncation.
- * - create_bind_target(): creates a file a device bind mount can cover.
- * - set_interface_address(): assigns an IPv4 address or mask with ioctl.
- * - drop_capabilities(): removes all capabilities before the command runs.
- * - status_code(): converts waitpid status to a shell-style exit status.
- * - child_entry(): adapts container_init() to clone()'s callback type.
- * - wait_for_pid(): waits through EINTR for one specific host process.
+ * Original student TODOs from the starter file
  * - container_namespaces(): selects the five isolation namespaces.
  * - container_write_idmaps(): maps container root to the runtime's host user.
  * - container_cgroup_init(): creates a cgroup and applies its limits.
@@ -20,6 +12,23 @@
  * - container_init(): acts as PID 1, launches the command, and reaps children.
  * - container_run(): drives the complete parent-side lifecycle.
  * - container_cleanup(): removes the empty cgroup after exit.
+ *
+ * Private helpers added for clarity and safe cleanup
+ * - report_errno(): prints a consistently prefixed system-call error.
+ * - format_path(): builds a path and rejects truncation.
+ * - create_bind_target(): creates a file a device bind mount can cover.
+ * - set_interface_address(): assigns an IPv4 address or mask with ioctl.
+ * - drop_capabilities(): removes all capabilities before the command runs.
+ * - status_code(): converts waitpid status to a shell-style exit status.
+ * - child_entry(): adapts container_init() to clone()'s callback type.
+ * - wait_for_pid(): waits through EINTR for one specific host process.
+ *
+ * Provided elsewhere; this file only calls them
+ * - write_file() is implemented in util.c.
+ * - container_net_host_setup() and container_net_host_teardown() are in net.c.
+ *   That provided host-networking code forks and execs the `ip` command. This
+ *   file performs the container-side networking directly with ioctl calls.
+ * - main() is implemented in main.c and calls container_run().
  */
 #define _GNU_SOURCE
 #include "container.h"
@@ -60,11 +69,8 @@
 
 #define ERROR_EXIT_STATUS 1
 
-/*
- * What: Prints a failed operation and its saved errno with `container:`.
- * Called by: Helpers and lifecycle functions after a Linux call fails.
- * Important: Call it before another operation can overwrite errno.
- */
+/* Added helper used throughout this file after a Linux call fails. It preserves
+ * errno while printing the required `container:` diagnostic prefix. */
 static int report_errno(const char *operation)
 {
     int saved_errno = errno;
@@ -73,11 +79,8 @@ static int report_errno(const char *operation)
     return -1;
 }
 
-/*
- * What: Joins two path components while detecting an overlong result.
- * Called by: Filesystem and cgroup code that builds runtime paths.
- * Important: A truncated path could modify the wrong host file, so it fails.
- */
+/* Added helper used by filesystem and cgroup setup. It joins two path
+ * components and rejects truncation rather than touching the wrong path. */
 static int format_path(char *out, size_t out_size,
                        const char *directory, const char *name)
 {
@@ -89,11 +92,8 @@ static int format_path(char *out, size_t out_size,
     return 0;
 }
 
-/*
- * What: Creates an empty file in the new /dev tmpfs for a bind mount.
- * Called by: container_setup() for /dev/null and /dev/zero.
- * Important: Mounting tmpfs hides the original rootfs placeholders.
- */
+/* Added helper used by container_setup() for /dev/null and /dev/zero. The new
+ * /dev tmpfs hides the rootfs placeholders, so fresh bind targets are needed. */
 static int create_bind_target(const char *path)
 {
     int fd = open(path, O_CREAT | O_WRONLY | O_CLOEXEC, 0666);
@@ -104,11 +104,8 @@ static int create_bind_target(const char *path)
     return 0;
 }
 
-/*
- * What: Assigns either an IPv4 address or netmask to one interface.
- * Called by: container_net_config() while it has CAP_NET_ADMIN.
- * Important: `request` is SIOCSIFADDR or SIOCSIFNETMASK.
- */
+/* Added helper used by container_net_config() before CAP_NET_ADMIN is dropped.
+ * The request is SIOCSIFADDR for an address or SIOCSIFNETMASK for a mask. */
 static int set_interface_address(int sock, const char *ifname,
                                  const char *address, unsigned long request)
 {
@@ -129,11 +126,9 @@ static int set_interface_address(int sock, const char *ifname,
     return 0;
 }
 
-/*
- * What: Removes bounding, effective, permitted, and inheritable capabilities.
- * Called by: container_setup() after privileged setup operations finish.
- * Important: Calling this earlier would break mounts and network setup.
- */
+/* Added helper used by container_setup() after privileged setup is complete.
+ * It clears bounding, effective, permitted, and inheritable capabilities;
+ * calling it earlier would prevent network and mount configuration. */
 static int drop_capabilities(void)
 {
     for (int cap = 0; cap <= CAP_LAST_CAP; cap++) {
@@ -154,11 +149,8 @@ static int drop_capabilities(void)
     return 0;
 }
 
-/*
- * What: Converts waitpid's encoded status to a normal process status.
- * Called by: container_init() and container_run() after child exits.
- * Important: A signal becomes 128 + signal, matching shell behavior.
- */
+/* Added helper shared by container_init() and container_run(). It converts
+ * waitpid's encoded result to a shell-style status, including 128 + signal. */
 static int status_code(int status)
 {
     if (WIFEXITED(status))
@@ -168,21 +160,15 @@ static int status_code(int status)
     return ERROR_EXIT_STATUS;
 }
 
-/*
- * What: Gives clone() its required `int (*)(void *)` callback.
- * Called by: clone() in container_run().
- * Important: Its return value becomes the init process's exit status.
- */
+/* Added adapter passed to clone() by container_run(). clone() requires an
+ * int (*)(void *) callback, and the return value becomes init's exit status. */
 static int child_entry(void *argument)
 {
     return container_init(argument);
 }
 
-/*
- * What: Waits for one host PID and retries interrupted waits.
- * Called by: container_run() on normal and error-cleanup paths.
- * Important: It waits for the cloned init, not arbitrary children.
- */
+/* Added helper used by container_run() on normal and cleanup paths. It retries
+ * EINTR while waiting for the specific host PID of the cloned container init. */
 static int wait_for_pid(pid_t pid, int *status)
 {
     pid_t result;
@@ -194,22 +180,17 @@ static int wait_for_pid(pid_t pid, int *status)
     return 0;
 }
 
-/*
- * What: Returns clone flags for user, PID, mount, UTS, and network isolation.
- * Called by: container_run() when it creates the container init.
- * Important: container_run() adds SIGCHLD separately.
- */
+/* Original student TODO. container_run() uses these five namespace flags when
+ * cloning init and adds SIGCHLD separately for normal parent wait semantics. */
 int container_namespaces(void)
 {
     return CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNS |
            CLONE_NEWUTS | CLONE_NEWNET;
 }
 
-/*
- * What: Maps UID/GID 0 inside the user namespace to the caller outside.
- * Called by: container_run() in the parent immediately after clone().
- * Important: `setgroups` must be denied before writing gid_map.
- */
+/* Original student TODO. The parent calls this immediately after clone() to map
+ * container UID/GID 0 to the caller. Linux requires setgroups to be denied
+ * before the gid_map write. */
 int container_write_idmaps(struct container *c, pid_t child)
 {
     (void)c;
@@ -236,11 +217,9 @@ int container_write_idmaps(struct container *c, pid_t child)
     return write_file(path, mapping);
 }
 
-/*
- * What: Creates one cgroup v2 directory and installs PID/memory limits.
- * Called by: container_run() before it creates the container init.
- * Important: An existing directory is valid stale state and is reused.
- */
+/* Original student TODO. container_run() calls this before clone() to create the
+ * cgroup and apply PID, memory, and swap limits. A stale existing directory is
+ * reused and its limits are rewritten. */
 int container_cgroup_init(struct container *c)
 {
     char path[PATH_MAX], value[64];
@@ -278,11 +257,8 @@ int container_cgroup_init(struct container *c)
     return write_file(path, "0");
 }
 
-/*
- * What: Moves the cloned init into the configured cgroup.
- * Called by: container_run() before releasing the child sync pipe.
- * Important: Future descendants inherit this cgroup membership.
- */
+/* Original student TODO. container_run() moves init into the cgroup before
+ * releasing it; the command and every later descendant inherit membership. */
 int container_cgroup_enter(struct container *c, pid_t child)
 {
     char path[PATH_MAX], pid_text[32];
@@ -292,11 +268,9 @@ int container_cgroup_enter(struct container *c, pid_t child)
     return write_file(path, pid_text);
 }
 
-/*
- * What: Builds isolation and then removes privilege from container init.
- * Called by: container_init() after parent-side ID-map/cgroup setup.
- * Important: Network/filesystem work must precede capability and seccomp drops.
- */
+/* Original student TODO. container_init() calls this after the parent finishes
+ * ID-map, cgroup, and host-network setup. It builds the child environment before
+ * dropping capabilities and installing seccomp. */
 int container_setup(struct container *c)
 {
     char tmp[PATH_MAX], dev[PATH_MAX], proc[PATH_MAX];
@@ -351,11 +325,8 @@ int container_setup(struct container *c)
     return container_seccomp();
 }
 
-/*
- * What: Marks the fresh namespace's loopback interface up and running.
- * Called by: container_setup() before it drops CAP_NET_ADMIN.
- * Important: Failure is reported but treated as best-effort by the caller.
- */
+/* Original student TODO. container_setup() calls this before dropping
+ * CAP_NET_ADMIN to bring up loopback. The specification makes it best-effort. */
 int container_network(void)
 {
     int sock = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
@@ -380,11 +351,8 @@ int container_network(void)
     return 0;
 }
 
-/*
- * What: Gives the optional veth an address, netmask, and default route.
- * Called by: container_setup() when `--net` was supplied.
- * Important: The host moves the veth here before releasing the child.
- */
+/* Original student TODO. With --net, container_setup() configures the veth that
+ * the provided host-side net.c moved into this namespace before child release. */
 int container_net_config(struct container *c)
 {
     if (c->net_prefix < 0 || c->net_prefix > 32) {
@@ -452,11 +420,8 @@ out:
     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (number), 0, 1), \
     BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA))
 
-/*
- * What: Installs a BPF filter returning EPERM for dangerous system calls.
- * Called by: container_setup() as its final operation.
- * Important: The arch check prevents interpreting another ABI's syscall IDs.
- */
+/* Original student TODO. container_setup() installs this BPF denylist last. The
+ * architecture check prevents another ABI's syscall numbers bypassing rules. */
 int container_seccomp(void)
 {
     struct sock_filter filter[] = {
@@ -531,11 +496,8 @@ int container_seccomp(void)
 }
 #undef DENY_SYSCALL
 
-/*
- * What: Runs as PID 1, starts the command, and reaps child/orphan exits.
- * Called by: child_entry() in the process created by container_run().
- * Important: It blocks until the parent finishes maps, cgroup, and networking.
- */
+/* Original student TODO. child_entry() runs this as container PID 1. It waits
+ * for parent setup, launches the requested command, and reaps children/orphans. */
 int container_init(struct container *c)
 {
     if (close(c->sync[1]) != 0) {
@@ -588,11 +550,8 @@ int container_init(struct container *c)
     }
 }
 
-/*
- * What: Creates, releases, waits for, and tears down one complete container.
- * Called by: provided main.c after command-line parsing.
- * Important: Failures kill a blocked child and release every owned resource.
- */
+/* Original student TODO and the only implemented entry point called by provided
+ * main.c. It owns the parent lifecycle and releases all partial state on error. */
 int container_run(struct container *c)
 {
     void *stack = NULL;
@@ -680,11 +639,8 @@ cleanup:
     return result;
 }
 
-/*
- * What: Removes the now-empty cgroup directory for this container.
- * Called by: container_run() after the cloned init is reaped.
- * Important: ENOENT is harmless because prior cleanup may have removed it.
- */
+/* Original student TODO. container_run() calls this after init is reaped to
+ * remove the empty cgroup; ENOENT is harmless if it was already removed. */
 int container_cleanup(struct container *c)
 {
     if (!c->cg_path[0])
