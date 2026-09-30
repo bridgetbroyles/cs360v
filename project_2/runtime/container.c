@@ -3,10 +3,6 @@
  * This file implements a minimal container runtime. main.c parses the command
  * line and calls container_run(); the lifecycle after that is implemented here.
  *
- * The original starter file supplied eleven TODO functions. Their original
- * instructions are preserved above the corresponding implementations below.
- * Each function comment begins with an unlabeled bullet summary: what it does,
- * who calls it, and the detail that is most important when reading the code.
  *
  * - container_namespaces(): selects the five isolation namespaces.
  * - container_write_idmaps(): maps container root to the runtime's host user.
@@ -71,7 +67,7 @@
 
 #define ERROR_EXIT_STATUS 1
 
-/* Added helper; this function was not one of the original TODO shells.
+/* Added helper; 
  * - Reports a failed Linux operation using the required `container:` prefix.
  * - Called throughout this file immediately after a system call fails.
  * - Preserves errno so reporting the error does not hide its original cause. */
@@ -83,7 +79,7 @@ static int report_errno(const char *operation)
     return -1;
 }
 
-/* Added helper; this function was not one of the original TODO shells.
+/* Added helper; 
  * - Joins a directory and name into one path.
  * - Called by filesystem, cgroup, device, and ID-map setup code.
  * - Rejects truncation instead of silently operating on the wrong path. */
@@ -98,7 +94,7 @@ static int format_path(char *out, size_t out_size,
     return 0;
 }
 
-/* Added helper; this function was not one of the original TODO shells.
+/* Added helper; 
  * - Creates an empty file that can be used as a bind-mount target.
  * - Called by container_setup() for /dev/null and /dev/zero.
  * - The new /dev tmpfs hides rootfs placeholders, so targets must be recreated. */
@@ -112,7 +108,7 @@ static int create_bind_target(const char *path)
     return 0;
 }
 
-/* Added helper; this function was not one of the original TODO shells.
+/* Added helper;
  * - Assigns either an IPv4 address or netmask to an interface with ioctl().
  * - Called by container_net_config() before CAP_NET_ADMIN is dropped.
  * - request selects SIOCSIFADDR for the address or SIOCSIFNETMASK for the mask. */
@@ -136,7 +132,7 @@ static int set_interface_address(int sock, const char *ifname,
     return 0;
 }
 
-/* Added helper; this function was not one of the original TODO shells.
+/* Added helper; 
  * - Removes the container process's bounding, effective, permitted, and
  *   inheritable capabilities and prevents privileges from being regained.
  * - Called by container_setup() after privileged setup is complete.
@@ -161,7 +157,7 @@ static int drop_capabilities(void)
     return 0;
 }
 
-/* Added helper; this function was not one of the original TODO shells.
+/* Added helper; 
  * - Converts waitpid()'s encoded result into a shell-style exit status.
  * - Called by container_init() and container_run().
  * - A signal death becomes 128 plus the signal number. */
@@ -216,7 +212,7 @@ int container_namespaces(void)
  * - Container ID 0 becomes the unprivileged user running this program outside
  *   the container; Linux requires setgroups to be denied before writing gid_map.
  *
- * The starter TODO required these writes through write_file():
+ * required these writes through write_file():
  *   /proc/<child>/uid_map   <- "0 <your-uid> 1"
  *   /proc/<child>/setgroups <- "deny"
  *   /proc/<child>/gid_map   <- "0 <your-gid> 1"
@@ -253,7 +249,7 @@ int container_write_idmaps(struct container *c, pid_t child)
  * - A negative PID or memory limit means the literal cgroup value "max"; swap
  *   is set to 0 so reaching the memory cap causes an OOM kill instead of swap.
  *
- * The starter TODO required enabling "+pids +memory" in
+ * required enabling "+pids +memory" in
  * <cgroup_base>/cgroup.subtree_control, creating <cgroup_base>/<name>, storing
  * that directory in c->cg_path, writing c->pids_max to pids.max, writing
  * c->mem_max to memory.max, and writing "0" to memory.swap.max. */
@@ -299,7 +295,7 @@ int container_cgroup_init(struct container *c)
  * - Called by container_run() after ID mapping and before releasing the child.
  * - The command and all later descendants inherit the init process's membership.
  *
- * The starter TODO required writing the child's PID to
+ * required writing the child's PID to
  * <cg_path>/cgroup.procs. */
 int container_cgroup_enter(struct container *c, pid_t child)
 {
@@ -397,7 +393,7 @@ int container_setup(struct container *c)
  * - It is best-effort because it needs CAP_NET_ADMIN; the container starts with
  *   only a loopback interface named "lo", and that interface initially is down.
  *
- * The starter TODO required an AF_INET/SOCK_DGRAM socket, a struct ifreq whose
+ * required an AF_INET/SOCK_DGRAM socket, a struct ifreq whose
  * name is "lo", SIOCGIFFLAGS to read its flags, IFF_UP | IFF_RUNNING added to
  * those flags, and SIOCSIFFLAGS to write them back. */
 int container_network(void)
@@ -431,7 +427,7 @@ int container_network(void)
  *   side and moves an interface named c->net_ifname into this namespace first;
  *   this function must run before CAP_NET_ADMIN is dropped.
  *
- * The starter TODO required SIOCSIFADDR with c->net_ip, SIOCSIFNETMASK with the
+ * required SIOCSIFADDR with c->net_ip, SIOCSIFNETMASK with the
  * mask derived from c->net_prefix, SIOCSIFFLAGS with IFF_UP | IFF_RUNNING, and
  * a default route through c->net_gw using struct rtentry and SIOCADDRT. The
  * route has destination and netmask 0.0.0.0 and flags RTF_UP | RTF_GATEWAY. */
@@ -508,7 +504,7 @@ out:
  * - The architecture check prevents a process from using another ABI's syscall
  *   numbers to bypass the filter; denied calls return EPERM instead of running.
  *
- * The starter TODO required loading seccomp_data.arch and accepting only
+ * required loading seccomp_data.arch and accepting only
  * AUDIT_ARCH_X86_64 or AUDIT_ARCH_AARCH64 for the build architecture, then
  * loading seccomp_data.nr. The filter denies ptrace, mount, umount2, pivot_root,
  * chroot, setns, unshare, reboot, swapon, swapoff, kexec calls, and module calls,
@@ -595,7 +591,7 @@ int container_seccomp(void)
  * - This process must remain alive as init instead of replacing itself with the
  *   command, because PID 1 is responsible for reaping orphaned descendants.
  *
- * The starter TODO required these operations in order:
+ * required these operations in order:
  *   1. Close c->sync[1], then block reading one byte from c->sync[0] until the
  *      parent has written ID maps, entered the cgroup, and completed optional
  *      host networking; then close c->sync[0].
@@ -663,7 +659,7 @@ int container_init(struct container *c)
  * - It owns every resource it creates and releases partial state on any error;
  *   diagnostic lines keep the `container:` prefix expected by the test harness.
  *
- * The starter TODO required these operations in order:
+ * required these operations in order:
  *   1. Call container_cgroup_init(c).
  *   2. Create c->sync, the pipe that prevents the child from running too soon.
  *   3. Allocate CONTAINER_STACK_SIZE bytes and clone child_entry into the fresh
@@ -775,8 +771,7 @@ cleanup:
  *   been reaped, on both the successful path and applicable failure paths.
  * - At that point the cgroup is empty and the mount namespace is already gone;
  *   ENOENT is harmless because the directory may already have been removed.
- *
- * The starter TODO required rmdir(c->cg_path) and allowed an already-missing
+ * required rmdir(c->cg_path) and allowed an already-missing
  * directory to be tolerated. */
 int container_cleanup(struct container *c)
 {
