@@ -1,3 +1,5 @@
+important, shellcontainer.c contains the original comments of container file so that you can determine what was intended to be learned and how specific things were specified for studying. 
+
 # 00 — Container Fundamentals
 
 ## Table of contents

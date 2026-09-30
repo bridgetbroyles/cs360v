@@ -38,9 +38,6 @@
  *   file performs the container-side networking directly with ioctl calls.
  * - main() is implemented in main.c and calls container_run().
  *
- * As originally shipped, container_run() returned 1 and nothing ran. The
- * implementation below replaces those TODO shells while retaining the original
- * intended order and responsibilities.
  */
 #define _GNU_SOURCE
 #include "container.h"
@@ -208,15 +205,12 @@ static int wait_for_pid(pid_t pid, int *status)
     return 0;
 }
 
-/* Original student TODO, now implemented.
+/* Original TODO, now implemented.
  * - Returns the flags that give the container five kinds of isolation.
  * - Called by container_run() when it creates the container init with clone().
  * - SIGCHLD is not included here; container_run() adds it separately so the
  *   parent can wait for the cloned child normally.
- *
- * The starter TODO required the bitwise OR of CLONE_NEWUSER, CLONE_NEWPID,
- * CLONE_NEWNS, CLONE_NEWUTS, and CLONE_NEWNET. Returning 0 would create no
- * namespace isolation at all. */
+ * */
 int container_namespaces(void)
 {
     return CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNS |
