@@ -1,9 +1,19 @@
 # Seccomp System-Call Filtering
 
-Capabilities restrict privileged operations, but seccomp restricts which system
-calls a process may attempt at all. The kernel evaluates a small BPF program on
-every system call. This implementation returns `EPERM` for a dangerous denylist
-and allows other calls.
+## What seccomp is and why capabilities are not sufficient
+
+A system call is how an ordinary program asks the kernel to do something that
+user-space code cannot do alone—for example open a file, create a process, mount
+a filesystem, or reboot a machine.
+
+Capabilities remove categories of root authority, but seccomp (“secure
+computing”) restricts which system calls a process may attempt at all. The kernel
+evaluates a small BPF filter before executing each call. This implementation
+returns `EPERM` for a dangerous denylist and allows other calls.
+
+The filter becomes part of container init’s kernel state. Its forked command
+inherits it, and `execvp()` does not remove it. Therefore command code cannot
+simply choose to bypass the policy.
 
 ## Architecture constant
 

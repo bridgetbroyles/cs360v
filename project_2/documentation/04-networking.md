@@ -1,9 +1,22 @@
 # Networking
 
-Every container receives a new network namespace. Initially it contains only a
-disabled loopback interface. In optional `--net` mode, provided host-side code
-also creates a virtual Ethernet pair: one end remains on the host, and the other
-is moved into the container as `ceth0`.
+## What “networking the container” means
+
+A network interface is a kernel endpoint that can send and receive network
+packets. A network namespace gives the container its own list of interfaces, IP
+addresses, routes, and related networking state instead of automatically sharing
+the host’s Wi-Fi/Ethernet interfaces.
+
+Initially the new namespace contains only disabled loopback. Loopback (`lo`) is
+internal communication: one process in the container can contact another through
+`localhost` without packets leaving the namespace.
+
+In optional `--net` mode, provided host code creates a virtual Ethernet pair.
+Think of it as two ends of a virtual cable: one end connects to host bridge
+`cvbr0`; the other moves into the container and is named `ceth0`. The assignment
+uses it so a host process/test can reach a server inside the container. The code
+does not automatically expose the container to the public Internet; it configures
+the interface and a default route through the host bridge.
 
 ## Important networking data structures
 

@@ -1,5 +1,29 @@
 # Filesystem Isolation, Capabilities, and Setup
 
+## Why a container needs a root filesystem
+
+The container shares the host kernel, but its programs still need executable
+files and meaningful paths such as `/bin`, `/proc`, `/dev`, and `/tmp`. The
+rootfs is a small directory tree, not a second kernel and not necessarily a full
+Linux distribution or virtual disk. This project builds it mostly from BusyBox.
+
+The rootfs’s storage size is not equal to the container’s RAM use. Files remain
+on host storage and the kernel brings needed pages into memory on demand. The
+memory cgroup limits runtime memory; it does not require loading the entire
+filesystem into RAM.
+
+A mount tells the kernel that a filesystem or existing path should appear at a
+particular location. Because the child has a mount namespace, these mount-table
+changes affect the container’s view without changing the host’s view.
+
+## Why capabilities are separate
+
+UID 0 traditionally has every root power. Linux capabilities divide those
+powers into individual permissions, such as administering a network interface.
+The user namespace temporarily gives container root enough namespace-scoped
+capabilities to build its environment. After setup, this file removes them so
+the requested command cannot repeat or undo privileged setup.
+
 ## `bind_device()`
 
 **Assignment status:** Added private helper. The specification required the two

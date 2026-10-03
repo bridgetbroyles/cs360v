@@ -1,5 +1,26 @@
 # Init, Full Lifecycle, and Cleanup
 
+## Why the runtime creates two child roles
+
+The host runtime creates container init with `clone()`. Container init then
+creates the requested command with `fork()`. More descendants may be created by
+that command.
+
+The extra process is intentional. If init directly used `execvp()`, the command
+would replace init and become PID 1. PID 1 must adopt and reap orphan processes,
+but an arbitrary command may not implement that responsibility. Keeping a small
+init supervisor prevents exited descendants from remaining as zombies and lets
+the runtime preserve the main command’s status.
+
+## Why the pipe is needed
+
+The parent cannot finish user-ID mapping, cgroup entry, or optional host-network
+setup until `clone()` gives it the child’s PID. Meanwhile, the child must not run
+ahead. `pipe()` creates a read end (`sync[0]`) and write end (`sync[1]`). The
+child blocks while reading one byte; the parent writes that byte only after setup.
+Closing the write end without a byte signals failure and lets the child exit
+instead of hanging or running partially configured.
+
 ## `status_to_exit_code()`
 
 **Assignment status:** Added private helper. The specification required status
