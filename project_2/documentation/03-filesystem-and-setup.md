@@ -75,6 +75,8 @@ static int bind_device(const char *rootfs, const char *name)
   The last and third arguments are unused for a bind mount, so they are `NULL`.
 - The function returns `0` only after the bind succeeds.
 
+- /dev/null and /dev/zero are special Linux devices that programs expect to exist. Your container needs them because it has its own filesystem, so it won't automatically see the host's /dev devices.
+
 The target must be created after mounting tmpfs on `<rootfs>/dev`, because that
 tmpfs hides any placeholder files that originally existed in the rootfs.
 
@@ -97,7 +99,6 @@ static int setup_filesystem(const char *rootfs)
     char path[PATH_MAX];
 ```
 
-- `static` keeps the helper private to `container.c`.
 - `rootfs` is the host path that will become `/`.
 - `path` is reused for `<rootfs>/tmp`, `<rootfs>/dev`, and `<rootfs>/proc`.
 
@@ -154,7 +155,8 @@ static int setup_filesystem(const char *rootfs)
 - A fresh `/dev` avoids exposing every host device.
 - User-namespace root cannot use `mknod()` to construct these device nodes, so
   the implementation exposes only the safe, needed host nodes through binds.
-- C’s `||` short-circuits: if binding `null` fails, `zero` is not attempted.
+- If either device bind fails, setup stops rather than continuing with an
+  incomplete `/dev`.
 
 ```c
     snprintf(path, sizeof path, "%s/proc", rootfs);

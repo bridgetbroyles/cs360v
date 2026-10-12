@@ -53,15 +53,10 @@ CHILD: child_entry() -> container_init()
 
 These are reusable reading tools, not separate topics to memorize line by line:
 
-- **`struct container *c`:** `c` points to the shared configuration object. `c->name` means “the `name` field in the object pointed to by `c`.”
-- **`->` and `.`:** use `->` for a pointer to a structure (`c->rootfs`); use `.` for a structure variable (`route.rt_flags`).
-- **`&variable`:** passes a variable's address so a function can read it or fill it. For example, `waitpid(..., &status, ...)` lets `waitpid()` store the status in `status`.
 - **`snprintf()`:** formats text in memory, usually a path or number. By itself, it does not configure the kernel.
 - **`write_file()`, `mount()`, `ioctl()`, `clone()`, etc.:** these perform the actual operation or ask the kernel to do it.
 - **Failure checks:** `if (call(...) < 0)` means “if this operation failed, take the error path.” `errno` stores the reason for many failures; `strerror(errno)` turns it into readable text.
 - **Return values:** these helpers commonly return `0` for success and `-1` for failure. Process entry/orchestration functions may return `1` to indicate failure.
-- **`(void)c;`:** only marks a required parameter as unused in that function. It does not change the container.
-- **`static` helper:** the function is private to this C source file.
 - **`goto fail`:** jumps to one shared cleanup block, often to close a socket before returning.
 
 Do not spend equal effort on every line. For declarations and repeated error-printing blocks, understand their role. Spend more time on system calls, their arguments, important flags, branching, and why the order matters.
@@ -185,7 +180,6 @@ static int write_cgroup_limit(struct container *c,
     return write_file(path, value);
 }
 ```
-`static` makes this helper private to this source file.
 ``` c
 snprintf(path, ..., "%s/%s", ...)
 ```
@@ -207,10 +201,9 @@ write_file(path, value)
 ```
 performs the actual write.
 ### 3 likely questions
-**Q1. Why is it `static`?** Only this source file needs the helper.
-**Q2. What does a negative limit mean here?** The helper represents it
+**Q1. What does a negative limit mean here?** The helper represents it
 by writing `max`.
-**Q3. Which function uses it?** `container_cgroup_init()` uses it for
+**Q2. Which function uses it?** `container_cgroup_init()` uses it for
 `pids.max`, `memory.max`, and `memory.swap.max`. ------------------------------------------------------------------------
 # Step 2: `container_run()` orchestrates the parent side
 ## Purpose and caller
@@ -365,11 +358,8 @@ static int child_entry(void *arg)
     return container_init((struct container *)arg);
 }
 ```
-`clone()` requires a callback accepting `void *`. The runtime passes `c` as the fourth argument to `clone()`. `arg` receives that same pointer as a generic `void *`.
-``` c
-(struct container *)arg
-```
-casts it back to the correct type. Then:
+`clone()` invokes this adapter with the container configuration supplied by
+`container_run()`. The adapter then starts:
 ``` c
 container_init(...)
 ```
@@ -379,8 +369,6 @@ starts the container-side lifecycle.
 signature does not match the callback signature required by this `clone()` interface.
 **Q2. Where does `arg` come from?** From the `c` argument passed to
 `clone()`.
-**Q3. What does the cast accomplish?** It tells C to interpret the
-generic pointer as `struct container *`. ------------------------------------------------------------------------
 # Parent setup: `container_write_idmaps()`
 ## Purpose and caller
 This function configures the UID/GID mapping of the new user namespace. It runs in the **parent**, after `clone()` returns the child's host PID and before the child is released.
@@ -995,7 +983,9 @@ static int make_ipv4_address(struct sockaddr *addr, const char *ip_text)
     return 0;
 }
 ```
-The cast converts the generic `sockaddr *` into the IPv4-specific `sockaddr_in *`, so the code can access IPv4 fields such as `sin_addr`. `memset()` clears the structure to avoid leftover/uninitialized values. `sin_family = AF_INET` marks it as IPv4. `inet_pton()` converts text such as `10.44.0.2` into the binary address form expected by the kernel.
+The helper builds the IPv4 address structure needed by the kernel. `sin_family`
+marks it as IPv4, and `inet_pton()` converts text such as `10.44.0.2` into the
+binary address form used by networking operations.
 ### 3 likely questions
 **Q1. Why cast to `sockaddr_in`?** Because the caller supplies generic
 socket-address storage, but this helper needs IPv4-specific fields.

@@ -60,27 +60,6 @@ int container_namespaces(void)
 }
 ```
 
-## Function declaration
-
-```c
-int container_namespaces(void)
-```
-
-This function:
-
-* takes no arguments
-* returns an `int`
-
-The returned integer is not being used as an ordinary numerical value such as `5` or `20`.
-
-Instead, it is being used as a **bitmask**.
-
-A bitmask is an integer where individual bits represent independent options.
-
-The namespace constants each represent a different option that can be passed to `clone()`.
-
----
-
 ## Starting the return expression
 
 ```c
@@ -109,11 +88,7 @@ However, the namespace initially needs its UID/GID mappings configured. That is 
 | CLONE_NEWPID
 ```
 
-The `|` is the **bitwise OR operator**.
-
-Here it means:
-
-> Keep the bits already present in the current flag value and turn on the bits represented by this new flag.
+Together, these flag values request all five namespace views from `clone()`.
 
 `CLONE_NEWPID` requests a new **PID namespace**.
 
@@ -253,18 +228,6 @@ And it does not mean that later flags replace earlier ones.
 
 ---
 
-## The semicolon
-
-```c
-;
-```
-
-terminates the `return` statement.
-
-The entire expression before it is evaluated as one bitmask.
-
----
-
 # What `container_namespaces()` actually does
 
 It is useful to separate this function from what happens later.
@@ -397,12 +360,6 @@ Before going line by line, it helps to identify what each piece of data represen
 | `path`    | `char[64]`           | Temporary buffer for a `/proc/...` control-file path.                                                          |
 | `mapping` | `char[64]`           | Temporary buffer for an ID-mapping rule.                                                                       |
 
-`pid_t` is the system type used for process IDs.
-
-The code casts the PID to `int` in the `snprintf()` calls because `%d` expects an `int`.
-
----
-
 # `(void)c`
 
 ```c
@@ -435,9 +392,7 @@ It does not change the container and does not perform any namespace operation.
 char path[64];
 ```
 
-This creates a character array on the stack.
-
-The function reuses this buffer several times.
+The function reuses this temporary path storage several times.
 
 It will first contain something like:
 
@@ -503,22 +458,6 @@ The result becomes:
 /proc/4312/uid_map
 ```
 
-Let's break down the format string:
-
-```c
-"/proc/%d/uid_map"
-```
-
-`%d` is replaced by the integer child PID.
-
-The cast:
-
-```c
-(int)child
-```
-
-converts the `pid_t` value to `int` for `%d`.
-
 Again, `snprintf()` is only constructing a string.
 
 It has **not** written the UID mapping yet.
@@ -547,13 +486,7 @@ Suppose the runtime is being run by host UID:
 1000
 ```
 
-Then the format:
-
-```text
-"0 %d 1"
-```
-
-produces:
+This creates:
 
 ```text
 0 1000 1

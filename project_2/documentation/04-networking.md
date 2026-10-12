@@ -196,7 +196,6 @@ int container_net_config(struct container *c)
     }
 ```
 
-- `netmask` is a typed pointer into another union field of `request`.
 - `uint32_t` guarantees exactly 32 bits, matching IPv4.
 - `0xFFFFFFFFu` is 32 one-bits. Shifting left leaves `net_prefix` leading ones
   and trailing zeros. For prefix 24, the result represents `255.255.255.0`.

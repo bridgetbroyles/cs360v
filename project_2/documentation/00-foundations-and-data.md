@@ -309,9 +309,6 @@ struct container {
 - **System call:** controlled request from a program to the kernel.
 - **`errno`:** code explaining a failed operation; `strerror(errno)` makes it
   readable.
-- **`PATH_MAX`:** constant used to size path-character arrays.
-- **`memset(&x, 0, sizeof x)`:** initializes every structure byte to zero before
-  sending it to the kernel.
 - **`ioctl()`:** general device/socket-control system call; here it configures
   network interfaces and routes.
 - **Inheritance:** children inherit namespaces, cgroup membership, mounts,

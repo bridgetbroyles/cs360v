@@ -56,8 +56,6 @@ static const int denied_syscalls[] = {
     (sizeof denied_syscalls / sizeof denied_syscalls[0])
 ```
 
-- `static` makes the array private to this file.
-- `const` prevents accidental modification.
 - Each `__NR_*` constant is the current architecture’s numeric syscall ID.
 - The list blocks tracing, mount/root manipulation, joining or creating more
   namespaces, machine reboot/swap/kernel replacement, and kernel-module changes.

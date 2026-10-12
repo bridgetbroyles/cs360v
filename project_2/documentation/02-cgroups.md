@@ -80,97 +80,9 @@ static int write_cgroup_limit(struct container *c,
 }
 ```
 
-## Function declaration
-
-```c
-static int write_cgroup_limit(struct container *c,
-                              const char *file_name, long limit)
-```
-
-There are several pieces here.
-
-### `static`
-
-```c
-static
-```
-
-means this function is only accessible from this source file.
-
-It is therefore a private helper rather than part of the public interface exposed through something like `container.h`.
-
-### `int`
-
-```c
-int
-```
-
-is the function's return type.
-
-The function ultimately returns the result of `write_file()`, which uses the project's usual convention of:
-
-```text
-0  -> success
--1 -> failure
-```
-
-### `struct container *c`
-
-```c
-struct container *c
-```
-
-is a pointer to the container's configuration/state structure.
-
-The function uses:
-
-```c
-c->cg_path
-```
-
-to determine which cgroup directory belongs to this container.
-
-### `const char *file_name`
-
-```c
-const char *file_name
-```
-
-is the name of the particular cgroup control file that should be modified.
-
-Examples:
-
-```text
-pids.max
-memory.max
-memory.swap.max
-```
-
-`const` means this function promises not to modify the string being pointed to.
-
-### `long limit`
-
-```c
-long limit
-```
-
-is the numerical resource limit that should be written.
-
-For example:
-
-```text
-100
-512000000
-0
-```
-
-A negative value has a special meaning in this helper: it represents an unlimited resource and will be converted into the cgroup v2 string:
-
-```text
-max
-```
-
----
+The helper uses the container’s saved cgroup path, a selected control file, and
+the configured limit. Its project-specific rule is that a negative limit means
+unlimited and becomes the cgroup v2 value `max`.
 
 ## Local variables
 
@@ -234,21 +146,7 @@ The cgroup interface expects text, so the numeric `long` cannot simply be passed
 snprintf(path, sizeof path, "%s/%s", c->cg_path, file_name);
 ```
 
-This constructs the path in memory.
-
-The format string:
-
-```c
-"%s/%s"
-```
-
-means:
-
-```text
-first string + "/" + second string
-```
-
-So if:
+This selects the cgroup control file. If:
 
 ```text
 c->cg_path = /sys/fs/cgroup/my_container
@@ -314,12 +212,6 @@ else
 ```
 
 If the limit is not negative, the number is converted into decimal text.
-
-The `%ld` format specifier means:
-
-```text
-format a long integer as a decimal number
-```
 
 For example:
 
@@ -419,48 +311,9 @@ int container_cgroup_init(struct container *c)
 }
 ```
 
-## Function declaration
+The function uses `c->cgroup_base`, `c->name`, and the requested limits, then
+saves the created directory in `c->cg_path` for later membership and cleanup.
 
-```c
-int container_cgroup_init(struct container *c)
-```
-
-This function receives the container structure so it can access information such as:
-
-```c
-c->cgroup_base
-c->name
-c->pids_max
-c->mem_max
-c->cg_path
-```
-
-It returns:
-
-```text
-0  -> initialization succeeded
--1 -> initialization failed
-```
-
----
-
-## Temporary path variable
-
-```c
-char path[PATH_MAX];
-```
-
-This creates a buffer for temporarily storing the path to the parent cgroup's control file.
-
-This variable is separate from:
-
-```c
-c->cg_path
-```
-
-because `path` is only needed temporarily, while `c->cg_path` needs to remain available to other container functions.
-
----
 
 # Enabling controllers for child cgroups
 
@@ -823,57 +676,9 @@ int container_cgroup_enter(struct container *c, pid_t child)
 }
 ```
 
-## Function declaration
+The saved cgroup path identifies the destination group, and the child’s
+host-visible PID becomes the value written to `cgroup.procs`.
 
-```c
-int container_cgroup_enter(struct container *c, pid_t child)
-```
-
-The function receives:
-
-```c
-c
-```
-
-to determine which cgroup should receive the process.
-
-It receives:
-
-```c
-child
-```
-
-which is the PID of the cloned container-init process.
-
----
-
-## Local variables
-
-```c
-char path[PATH_MAX + 32];
-char pid_text[16];
-```
-
-Two strings are needed.
-
-`path` will contain:
-
-```text
-<cgroup path>/cgroup.procs
-```
-
-`pid_text` will contain the child's PID as text.
-
-For example:
-
-```text
-child = 12345
-pid_text = "12345"
-```
-
-The cgroup interface expects the PID to be written as text.
-
----
 
 ## Constructing the `cgroup.procs` path
 
@@ -903,26 +708,6 @@ Again, `snprintf()` only creates the string in memory. It has not moved the proc
 ```c
 snprintf(pid_text, sizeof pid_text, "%d", (int)child);
 ```
-
-`child` has type:
-
-```c
-pid_t
-```
-
-The code casts it to `int`:
-
-```c
-(int)child
-```
-
-and formats it using:
-
-```c
-%d
-```
-
-The result is a string.
 
 For example:
 
