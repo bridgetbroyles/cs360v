@@ -29,6 +29,8 @@ The implementation was run in the Ubuntu VM against the official test suite:
    `container_run()`, and `container_cleanup()`.
 8. [07-whole-project-summary.md](07-whole-project-summary.md) connects all the
    functions into one end-to-end story and summarizes the design decisions.
+9. [08-quiz-cheatsheet.md](08-quiz-cheatsheet.md) is a compact vocabulary,
+   lifecycle, isolation, networking, and seccomp reference for the quiz.
 
 ## What the assignment asked us to implement
 
@@ -47,21 +49,3 @@ The specification explicitly required these eleven functions:
 | `container_init()` | Act as PID 1, launch the command, and reap children. |
 | `container_run()` | Coordinate the complete parent-side lifecycle. |
 | `container_cleanup()` | Remove the container cgroup. |
-
-Helen’s implementation added these seven private helpers. They were **not named
-or required as separate functions by the specification**; they split complicated
-work into smaller pieces:
-
-| Added helper | Why it exists |
-|---|---|
-| `write_cgroup_limit()` | Reuses the same formatting and file-writing logic for cgroup limits. |
-| `bind_device()` | Creates and bind-mounts one device file. |
-| `setup_filesystem()` | Keeps the long filesystem sequence separate from the coordinator. |
-| `drop_capabilities()` | Encapsulates all capability-removal steps. |
-| `make_ipv4_address()` | Converts readable IPv4 text into a kernel socket structure. |
-| `status_to_exit_code()` | Converts `waitpid()` status into a normal shell exit code. |
-| `child_entry()` | Adapts `container_init()` to the callback signature required by `clone()`. |
-
-Functions such as `main()`, `write_file()`, `container_net_host_setup()`, and
-`container_net_host_teardown()` are used by this implementation but live in
-other provided source files. They are summarized where their calls occur.

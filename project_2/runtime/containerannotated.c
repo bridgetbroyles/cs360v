@@ -1,98 +1,82 @@
 /*
- * containerannotated.c
+ * CONTAINER.C — ANNOTATED STUDY COPY
  *
- * This is an annotated copy of container.c. It preserves the implementation's
- * behavior while explaining why important statements exist. The normal build
- * still uses container.c; this file is a study copy unless the Makefile is run
- * with SRC=containerannotated.c.
+ * ASSIGNMENT CONTEXT
+ *   - main.c parses the command line into struct container, then calls only
+ *     container_run(). Everything after that call is this implementation's job.
+ *   - The TODOs in the original starter file are the implementation checklist:
+ *     which mechanisms to call and the required order.
+ *   - SPEC.md is the contract. If a comment and SPEC.md disagree, follow SPEC.md.
+ *   - Starter state: container_run() returned 1, so no command or test ran.
+ *     The first dependency to make work was command execution: container_run()
+ *     creates init, container_init() launches the command, and container_setup()
+ *     pivots into rootfs where that command lives.
  *
- * HIGH-LEVEL STORY
- * ----------------
- * A container is a group of ordinary Linux processes that share the host
- * kernel but receive isolated views and restrictions. There is no guest kernel.
+ * PROVIDED FILES (not implemented here)
+ *   - main.c: argument parsing and the only direct call to container_run().
+ *   - util.c: write_file(), used for /proc and cgroup control files.
+ *   - net.c: host-side --net bridge/veth creation and teardown.
+ *   - container.h: struct container, function declarations, stack-size constant.
  *
- * Provided main.c fills a `struct container` and calls container_run(). The
- * parent creates a resource-limited cgroup, a synchronization pipe, and a child
- * with new user, PID, mount, UTS, and network namespaces. The child becomes PID
- * 1 inside the PID namespace and waits on the pipe. While it waits, the parent
- * maps container root to the caller's ordinary host UID/GID, places the child
- * in the cgroup, and optionally constructs the host side of a virtual network.
- *
- * After the parent sends one release byte, container init configures its
- * hostname/network, pivots into a small read-only root filesystem, drops every
- * capability, and installs a seccomp system-call filter. Init then forks: its
- * child becomes the requested command through execvp(), while init stays PID 1
- * to reap the command and any orphan descendants. Finally, the host parent
- * waits for init, removes networking and the cgroup, and returns the command's
- * exit status.
+ * WHAT THIS PROGRAM BUILDS
+ *   - One ordinary Linux child becomes container init (PID 1 inside).
+ *   - Init forks one child that becomes the requested command.
+ *   - Both share the host kernel; this is a container, not a virtual machine.
  *
  * PROCESS TREE
- * ------------
- * host runtime: container_run()
- * `-- container init: container_init(), PID 1 inside
- *     `-- requested command: execvp(c->argv[0], c->argv)
+ *   host main()
+ *     -> container_run()                 host-side coordinator
+ *          -> cloned container_init()    PID 1 inside; performs setup/reaping
+ *               -> forked command        PID 2 inside; replaced by execvp()
  *
- * REQUIRED VS. ADDED FUNCTIONS
- * ----------------------------
- * The specification required the eleven public container_* functions in this
- * file. The static functions are private helpers added by this implementation:
- * write_cgroup_limit, bind_device, setup_filesystem, drop_capabilities,
- * make_ipv4_address, status_to_exit_code, and child_entry.
+ * SETUP ORDER
+ *   1. Parent creates cgroup, pipe, namespaces, identity maps, and optional net.
+ *   2. Parent releases init by writing one byte to the pipe.
+ *   3. Init sets hostname/network, enters rootfs, drops capabilities, adds seccomp.
+ *   4. Init forks and reaps the requested command.
+ *   5. Host parent reaps init, cleans up, and returns the command's exit status.
+ *
+ * FUNCTION GROUPS
+ *   Namespaces/identity  container_namespaces, container_write_idmaps
+ * 
+ *   Resource limits      write_cgroup_limit, container_cgroup_init/enter
+ * 
+ *   Filesystem/security  bind_device, setup_filesystem, drop_capabilities,
+ *                        container_setup, container_seccomp
+ * 
+ *   Networking           container_network, make_ipv4_address,
+ *                        container_net_config
+ * 
+ *   Process lifecycle    status_to_exit_code, container_init, child_entry,
+ *                        container_run, container_cleanup
  */
 
-/* Expose GNU/Linux declarations such as clone() before including headers. */
 #define _GNU_SOURCE
 
-/* Project-provided declarations, struct container, and stack-size constant. */
 #include "container.h"
-
-/* clone() flags and declaration. */
 #include <sched.h>
-/* Diagnostics and formatted strings. */
 #include <stdio.h>
-/* malloc() and free(). */
 #include <stdlib.h>
-/* strlen(), memset(), strncpy(), and strerror(). */
 #include <string.h>
-/* read(), write(), close(), fork(), execvp(), getuid(), and getgid(). */
 #include <unistd.h>
-/* errno and error constants such as EEXIST, EINVAL, EINTR, and ENOENT. */
 #include <errno.h>
-/* open() flags. */
 #include <fcntl.h>
-/* SIGCHLD. */
 #include <signal.h>
-/* mount(), umount2(), and mount flags. */
 #include <sys/mount.h>
-/* mkdir() and rmdir-related declarations. */
 #include <sys/stat.h>
-/* syscall() numbers such as SYS_pivot_root, SYS_capset, and SYS_seccomp. */
 #include <sys/syscall.h>
-/* waitpid() and wait-status macros. */
 #include <sys/wait.h>
-/* ioctl(). */
 #include <sys/ioctl.h>
-/* prctl(). */
 #include <sys/prctl.h>
-/* Linux capability structures and constants. */
 #include <linux/capability.h>
-/* Classic BPF instruction structures/macros. */
 #include <linux/filter.h>
-/* Seccomp structures and return actions. */
 #include <linux/seccomp.h>
-/* Architecture identifiers used by the seccomp filter. */
 #include <linux/audit.h>
-/* offsetof() and size_t. */
 #include <stddef.h>
-/* socket(). */
 #include <sys/socket.h>
-/* struct ifreq and interface flags. */
 #include <net/if.h>
-/* struct rtentry and route flags. */
 #include <net/route.h>
-/* struct sockaddr_in. */
 #include <netinet/in.h>
-/* inet_pton() and htonl(). */
 #include <arpa/inet.h>
 
 /*
@@ -115,11 +99,7 @@ int container_namespaces(void)
      * for configuration or identification without changing the host name.
      * NET gives it separate interfaces, addresses, and routes for --net mode.
      */
-    return CLONE_NEWUSER
-         | CLONE_NEWPID
-         | CLONE_NEWNS
-         | CLONE_NEWUTS
-         | CLONE_NEWNET;
+    return CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWNET;
 }
 
 /*
@@ -214,7 +194,7 @@ static int write_cgroup_limit(struct container *c,
  * REQUIRED FUNCTION: container_cgroup_init
  * Called first by container_run() in the parent.
  * Creates this container's control group and applies process/memory limits.
- * 
+ *
  */
 int container_cgroup_init(struct container *c)
 {
@@ -248,7 +228,8 @@ int container_cgroup_init(struct container *c)
      * not set the process or memory limits; the cgroup control files below it
      * do that. The kernel manages access to those control files separately.
      */
-    if (mkdir(c->cg_path, 0755) < 0 && errno != EEXIST) {
+    if (mkdir(c->cg_path, 0755) < 0 && errno != EEXIST)
+    {
         fprintf(stderr, "container: create cgroup %s: %s\n",
                 c->cg_path, strerror(errno));
         return -1;
@@ -304,8 +285,8 @@ int container_cgroup_enter(struct container *c, pid_t child)
  * ADDED HELPER: bind_device
  * Called twice by setup_filesystem(), for /dev/null and /dev/zero.
  * Creates a mount target and overlays the corresponding host device there.
- * 
- * dev/null is used in linux for discarding output streams and as a dev/zero is  
+ *
+ * dev/null is used in linux for discarding output streams and as a dev/zero is
  * source of empty input streams. devices expected to exist in linux
  */
 static int bind_device(const char *rootfs, const char *name)
@@ -327,7 +308,8 @@ static int bind_device(const char *rootfs, const char *name)
      * O_CLOEXEC prevents this descriptor leaking if an exec unexpectedly occurs.
      */
     int fd = open(target_path, O_CREAT | O_WRONLY | O_CLOEXEC, 0666);
-    if (fd < 0) {
+    if (fd < 0)
+    {
         fprintf(stderr, "container: create %s: %s\n",
                 target_path, strerror(errno));
         return -1;
@@ -342,7 +324,8 @@ static int bind_device(const char *rootfs, const char *name)
      * avoids creating new device nodes, an operation this unprivileged user
      * namespace is not permitted to perform.
      */
-    if (mount(host_path, target_path, NULL, MS_BIND, NULL) < 0) {
+    if (mount(host_path, target_path, NULL, MS_BIND, NULL) < 0)
+    {
         fprintf(stderr, "container: bind %s: %s\n",
                 host_path, strerror(errno));
         return -1;
@@ -358,84 +341,133 @@ static int bind_device(const char *rootfs, const char *name)
  */
 static int setup_filesystem(const char *rootfs)
 {
-    /* Reused for <rootfs>/tmp, <rootfs>/dev, and <rootfs>/proc. */
+    /*
+     * Temporary buffer for building paths inside rootfs.
+     * For example, if rootfs is "/images/miniroot", path can hold
+     * "/images/miniroot/tmp" or "/images/miniroot/dev".
+     */
     char path[PATH_MAX];
 
     /*
-     * Recursively mark mounts private. Without this, mount changes could
-     * propagate through shared-mount relationships back to the host.
+     * Stop mount changes made by this container from propagating to
+     * the host or other mount namespaces. This keeps the container's
+     * filesystem mount changes separate from the host's.
      */
-    if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) < 0) {
+    if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) < 0)
+    {
         fprintf(stderr, "container: make / private: %s\n", strerror(errno));
         return -1;
     }
 
-    /* pivot_root() requires rootfs to be a mount point, so bind it to itself. */
-    if (mount(rootfs, rootfs, NULL, MS_BIND | MS_REC, NULL) < 0) {
+    /*
+     * Make rootfs a mount point. pivot_root() requires the new root
+     * to be a mount point, not just an ordinary directory.
+     * A mount point is a directory that is used as an access point to a mounted filesystem. In this case, rootfs is being made a mount point so that it can be used as the new root filesystem for the container.
+     */
+    if (mount(rootfs, rootfs, NULL, MS_BIND | MS_REC, NULL) < 0)
+    {
         fprintf(stderr, "container: bind rootfs: %s\n", strerror(errno));
         return -1;
     }
 
-    /* Remount the rootfs bind read-only so the command cannot alter its image. */
+    /*
+     * Make the root filesystem read-only so the container cannot
+     * modify the files stored in the original rootfs image.
+     * We will create separate writable areas for temporary files
+     * and devices below.
+     */
     if (mount(NULL, rootfs, NULL,
-              MS_BIND | MS_REMOUNT | MS_RDONLY, NULL) < 0) {
+              MS_BIND | MS_REMOUNT | MS_RDONLY, NULL) < 0)
+    {
         fprintf(stderr, "container: remount rootfs read-only: %s\n",
                 strerror(errno));
         return -1;
     }
 
-    /* Build the future /tmp path under the not-yet-pivoted rootfs. */
+    /*
+     * Build the path to the directory that will become /tmp inside
+     * the container. Mounting tmpfs here gives the container a
+     * writable temporary directory even though rootfs is read-only.
+     */
     snprintf(path, sizeof path, "%s/tmp", rootfs);
 
-    /* Overlay writable in-memory tmpfs because the underlying root is read-only. */
-    if (mount("tmpfs", path, "tmpfs", 0, NULL) < 0) {
+    if (mount("tmpfs", path, "tmpfs", 0, NULL) < 0)
+    {
         fprintf(stderr, "container: mount /tmp: %s\n", strerror(errno));
         return -1;
     }
 
-    /* Build and mount a fresh /dev so host devices are not broadly exposed. */
+    /*
+     * Build the path to the directory that will become /dev.
+     * Mount a fresh tmpfs here instead of exposing the host's /dev,
+     * which contains devices the container should not automatically access.
+     */
     snprintf(path, sizeof path, "%s/dev", rootfs);
-    if (mount("tmpfs", path, "tmpfs", 0, NULL) < 0) {
+
+    if (mount("tmpfs", path, "tmpfs", 0, NULL) < 0)
+    {
         fprintf(stderr, "container: mount /dev: %s\n", strerror(errno));
         return -1;
     }
 
-    /* Expose only the two devices required by the project. */
+    /*
+     * Add the two devices this project needs to the new /dev.
+     * bind_device() makes the host's real devices available at
+     * rootfs/dev/null and rootfs/dev/zero.
+     */
     if (bind_device(rootfs, "null") < 0 || bind_device(rootfs, "zero") < 0)
         return -1;
 
-    /* Build the future /proc path. */
+    /*
+     * Build the path to the directory that will become /proc.
+     * Mounting proc gives programs access to process information,
+     * such as the information used by commands like ps.
+     */
     snprintf(path, sizeof path, "%s/proc", rootfs);
 
-    /*
-     * Mount proc before pivoting. It will reflect the new PID namespace; doing
-     * this after the old /proc is detached can fail with EPERM.
-     */
-    if (mount("proc", path, "proc", 0, NULL) < 0) {
+    if (mount("proc", path, "proc", 0, NULL) < 0)
+    {
         fprintf(stderr, "container: mount /proc: %s\n", strerror(errno));
         return -1;
     }
 
-    /* Move into rootfs so "." identifies the desired new root. */
-    if (chdir(rootfs) < 0) {
+    /*
+     * Enter rootfs so "." refers to the directory that will become
+     * the container's new root.
+     * chdir changes the current working directory of the process to rootfs. This is necessary because pivot_root() requires the new root filesystem to be the current working directory.
+     */
+    if (chdir(rootfs) < 0)
+    {
         fprintf(stderr, "container: chdir rootfs: %s\n", strerror(errno));
         return -1;
     }
 
-    /* glibc has no wrapper, so invoke pivot_root through syscall(). */
-    if (syscall(SYS_pivot_root, ".", ".") < 0) {
+    /*
+     * Switch the process's root filesystem to rootfs.
+     * After this succeeds, the container sees rootfs as its /.
+     */
+    if (syscall(SYS_pivot_root, ".", ".") < 0)
+    {
         fprintf(stderr, "container: pivot_root: %s\n", strerror(errno));
         return -1;
     }
 
-    /* Detach the old host root, removing the container's route back to it. */
-    if (umount2(".", MNT_DETACH) < 0) {
+    /*
+     * Detach the old root filesystem so the container cannot keep
+     * accessing the host's old filesystem through the previous root.
+     */
+    if (umount2(".", MNT_DETACH) < 0)
+    {
         fprintf(stderr, "container: detach old root: %s\n", strerror(errno));
         return -1;
     }
 
-    /* Establish a sensible current directory in the new filesystem root. */
-    if (chdir("/") < 0) {
+    /*
+     * Set the working directory to the new root. This ensures that
+     * relative paths used by later code start from the container's /.
+     */
+    if (chdir("/") < 0)
+    {
         fprintf(stderr, "container: chdir /: %s\n", strerror(errno));
         return -1;
     }
@@ -447,14 +479,28 @@ static int setup_filesystem(const char *rootfs)
  * ADDED HELPER: drop_capabilities
  * Called near the end of container_setup().
  * Removes every category of root power and prevents privilege recovery.
+ *
+ * why do we need to do this ?
+ * Because even though the process is running as UID 0 inside the container, it is still running as an unprivileged user on the host. If we do not drop capabilities, the process could potentially regain privileges through setuid binaries or other mechanisms. Dropping capabilities ensures that the process cannot gain elevated privileges and helps maintain the isolation and security of the container.
  */
 static int drop_capabilities(void)
 {
-    /* Visit every capability number understood by the build headers. */
-    for (int cap = 0; cap <= CAP_LAST_CAP; cap++) {
-        /* Remove cap from the bounding ceiling for this process and descendants. */
-        if (prctl(PR_CAPBSET_DROP, cap, 0, 0, 0) < 0 && errno != EINVAL) {
-            /* EINVAL is harmless when an older kernel lacks this cap number. */
+    /*
+     * Try to remove every capability from the bounding set.
+     * The bounding set limits which capabilities a process can regain
+     * through certain privilege-gaining operations.
+     * CAP_LAST_CAP is the highest capability number supported by this kernel.
+     */
+    for (int cap = 0; cap <= CAP_LAST_CAP; cap++)
+    {
+        /*
+         * cap is the capability number we are removing.
+         * PR_CAPBSET_DROP asks Linux to remove it from the bounding set.
+         * EINVAL is ignored because this capability number may not be
+         * supported by the kernel. Any other error means setup failed.
+         */
+        if (prctl(PR_CAPBSET_DROP, cap, 0, 0, 0) < 0 && errno != EINVAL)
+        {
             fprintf(stderr,
                     "container: drop capability %d from bounding set: %s\n",
                     cap, strerror(errno));
@@ -462,37 +508,59 @@ static int drop_capabilities(void)
         }
     }
 
-    /* Header identifies the capability API version and target process. */
+    /*
+     * header describes the capability-setting request sent to Linux.
+     * data holds the actual capability sets we want the process to have.
+     * Two records are used because capability API version 3 stores
+     * capability bits in two 32-bit groups.
+     */
     struct __user_cap_header_struct header;
-
-    /* Version 3 needs two records for capability bits 0-31 and 32-63. */
     struct __user_cap_data_struct data[2];
 
-    /* Zero initialization makes all capability sets in data empty. */
+    /*
+     * Initialize everything to zero. This makes all capability masks
+     * in data empty, meaning we are requesting no effective,
+     * permitted, or inheritable capabilities.
+     */
     memset(&header, 0, sizeof header);
     memset(data, 0, sizeof data);
 
-    /* Select the modern two-record capability structure layout. */
+    /*
+     * Tell Linux which format of the capability structures we are using.
+     */
     header.version = _LINUX_CAPABILITY_VERSION_3;
 
-    /* PID 0 means apply the change to the calling process. */
+    /*
+     * PID 0 means the capability change applies to this process itself.
+     */
     header.pid = 0;
 
-    /* Clear effective, permitted, and inheritable capabilities. */
-    if (syscall(SYS_capset, &header, data) < 0) {
+    /*
+     * Ask Linux to replace this process's capability sets with the
+     * empty sets in data, removing the capabilities it currently holds.
+     */
+    if (syscall(SYS_capset, &header, data) < 0)
+    {
         fprintf(stderr, "container: clear capabilities: %s\n", strerror(errno));
         return -1;
     }
 
-    /* Forbid later exec'd setuid/file-capability programs from gaining power. */
-    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) {
+    /*
+     * Prevent this process and its future children from gaining new
+     * privileges through operations such as executing a setuid program.
+     * This setting cannot be turned off once enabled.
+     */
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0)
+    {
         fprintf(stderr, "container: set no_new_privs: %s\n", strerror(errno));
         return -1;
     }
 
+    /*
+     * All capability-removal steps succeeded.
+     */
     return 0;
 }
-
 /*
  * REQUIRED FUNCTION: container_setup
  * Called by container_init() after the parent releases it.
@@ -500,28 +568,29 @@ static int drop_capabilities(void)
  */
 int container_setup(struct container *c)
 {
-    /* Change only this UTS namespace's hostname. */
-    if (sethostname(c->hostname, strlen(c->hostname)) < 0) {
+    /* Set the requested hostname without changing the host, because this is a private UTS view. */
+    if (sethostname(c->hostname, strlen(c->hostname)) < 0)
+    {
         fprintf(stderr, "container: sethostname: %s\n", strerror(errno));
         return -1;
     }
 
-    /* Bring private loopback up; the specification treats failure as best effort. */
+    /* Bring up private loopback so local clients and servers can use localhost. */
     (void)container_network();
 
-    /* In --net mode configure the veth that provided host code already moved in. */
+    /* In --net mode, finish configuring the veth that the provided host code moved here. */
     if (c->net_enabled)
         (void)container_net_config(c);
 
-    /* Build and pivot into the isolated filesystem while mount power remains. */
+    /* Build and enter the isolated filesystem before capabilities and seccomp forbid mount work. */
     if (setup_filesystem(c->rootfs) < 0)
         return -1;
 
-    /* Remove root-like powers after all operations that require them. */
+    /* Drop root-like powers only after setup, because mount and networking need them. */
     if (drop_capabilities() < 0)
         return -1;
 
-    /* Install last because the filter blocks mount(), umount2(), and pivot_root(). */
+    /* Install last because this filter deliberately blocks mount(), umount2(), and pivot_root(). */
     if (container_seccomp() < 0)
         return -1;
 
@@ -535,9 +604,10 @@ int container_setup(struct container *c)
  */
 int container_network(void)
 {
-    /* This socket is a handle for networking ioctls; no datagrams are sent. */
+    /* This socket is only a handle for network-control ioctls; it sends no packets. */
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock < 0) {
+    if (sock < 0)
+    {
         fprintf(stderr, "container: socket: %s\n", strerror(errno));
         return -1;
     }
@@ -551,24 +621,26 @@ int container_network(void)
     /* Select the loopback interface; leave room for a terminating NUL. */
     strncpy(request.ifr_name, "lo", IFNAMSIZ - 1);
 
-    /* Read existing flags first so later code preserves unrelated flag bits. */
-    if (ioctl(sock, SIOCGIFFLAGS, &request) < 0) {
+    /* Read current flags so enabling loopback does not erase unrelated kernel-set flags. */
+    if (ioctl(sock, SIOCGIFFLAGS, &request) < 0)
+    {
         fprintf(stderr, "container: read lo flags: %s\n", strerror(errno));
         close(sock);
         return -1;
     }
 
-    /* Add the administratively-up and operationally-running bits. */
+    /* Mark loopback usable; otherwise localhost traffic has no active interface. */
     request.ifr_flags |= IFF_UP | IFF_RUNNING;
 
     /* Ask the kernel to apply the modified flags. */
-    if (ioctl(sock, SIOCSIFFLAGS, &request) < 0) {
+    if (ioctl(sock, SIOCSIFFLAGS, &request) < 0)
+    {
         fprintf(stderr, "container: bring lo up: %s\n", strerror(errno));
         close(sock);
         return -1;
     }
 
-    /* The interface stays configured after its control socket closes. */
+    /* The kernel retains the interface state, so this temporary control handle is no longer needed. */
     close(sock);
     return 0;
 }
@@ -590,7 +662,8 @@ static int make_ipv4_address(struct sockaddr *addr, const char *ip_text)
     ipv4->sin_family = AF_INET;
 
     /* inet_pton converts presentation text to network-format address bytes. */
-    if (inet_pton(AF_INET, ip_text, &ipv4->sin_addr) != 1) {
+    if (inet_pton(AF_INET, ip_text, &ipv4->sin_addr) != 1)
+    {
         fprintf(stderr, "container: bad IPv4 address '%s'\n", ip_text);
         return -1;
     }
@@ -610,9 +683,10 @@ int container_net_config(struct container *c)
      * 10.44.0.2.  The provided host setup moved ceth0 into this namespace;
      * this function assigns its address, activates it, and adds its route.
      */
-    /* Create a control socket for address, flag, mask, and route ioctls. */
+    /* Create a control socket because these ioctls need a network-kernel handle, not a packet connection. */
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock < 0) {
+    if (sock < 0)
+    {
         fprintf(stderr, "container: socket: %s\n", strerror(errno));
         return -1;
     }
@@ -621,15 +695,16 @@ int container_net_config(struct container *c)
     struct ifreq request;
     memset(&request, 0, sizeof request);
 
-    /* Select the moved-in interface, normally ceth0. */
+    /* Select the moved-in veth so later requests affect the container interface, not loopback. */
     strncpy(request.ifr_name, c->net_ifname, IFNAMSIZ - 1);
 
     /* Parse c->net_ip into request.ifr_addr. */
     if (make_ipv4_address(&request.ifr_addr, c->net_ip) < 0)
         goto fail;
 
-    /* Assign that address to the selected interface. */
-    if (ioctl(sock, SIOCSIFADDR, &request) < 0) {
+    /* Give ceth0 an address so it can identify itself and exchange IP packets. */
+    if (ioctl(sock, SIOCSIFADDR, &request) < 0)
+    {
         fprintf(stderr, "container: set %s address: %s\n",
                 c->net_ifname, strerror(errno));
         goto fail;
@@ -651,15 +726,17 @@ int container_net_config(struct container *c)
     /* Convert host byte order to the network byte order required for IPv4. */
     netmask->sin_addr.s_addr = htonl(mask_bits);
 
-    /* Assign the calculated netmask. */
-    if (ioctl(sock, SIOCSIFNETMASK, &request) < 0) {
+    /* Tell the kernel which addresses are directly reachable on this local network. */
+    if (ioctl(sock, SIOCSIFNETMASK, &request) < 0)
+    {
         fprintf(stderr, "container: set %s netmask: %s\n",
                 c->net_ifname, strerror(errno));
         goto fail;
     }
 
     /* Read existing interface flags before modifying them. */
-    if (ioctl(sock, SIOCGIFFLAGS, &request) < 0) {
+    if (ioctl(sock, SIOCGIFFLAGS, &request) < 0)
+    {
         fprintf(stderr, "container: read %s flags: %s\n",
                 c->net_ifname, strerror(errno));
         goto fail;
@@ -668,8 +745,9 @@ int container_net_config(struct container *c)
     /* Preserve existing bits while adding UP and RUNNING. */
     request.ifr_flags |= IFF_UP | IFF_RUNNING;
 
-    /* Apply the flags so the veth can carry packets. */
-    if (ioctl(sock, SIOCSIFFLAGS, &request) < 0) {
+    /* Activate the veth; an addressed but down interface still cannot carry packets. */
+    if (ioctl(sock, SIOCSIFFLAGS, &request) < 0)
+    {
         fprintf(stderr, "container: bring %s up: %s\n",
                 c->net_ifname, strerror(errno));
         goto fail;
@@ -691,8 +769,9 @@ int container_net_config(struct container *c)
     /* Mark this as an enabled route whose next hop is a gateway. */
     route.rt_flags = RTF_UP | RTF_GATEWAY;
 
-    /* Add the default route to this network namespace's route table. */
-    if (ioctl(sock, SIOCADDRT, &route) < 0) {
+    /* Add the catch-all route so traffic beyond the local subnet goes to the host bridge gateway. */
+    if (ioctl(sock, SIOCADDRT, &route) < 0)
+    {
         fprintf(stderr, "container: add default route via %s: %s\n",
                 c->net_gw, strerror(errno));
         goto fail;
@@ -708,7 +787,7 @@ fail:
     return -1;
 }
 
-/* Syscall numbers differ by CPU ABI, so identify the build architecture. */
+/* Syscall numbers differ by CPU ABI; checking architecture prevents number 165 meaning different things. */
 #if defined(__x86_64__)
 #define OUR_AUDIT_ARCH AUDIT_ARCH_X86_64
 #elif defined(__aarch64__)
@@ -717,7 +796,7 @@ fail:
 #error "container_seccomp() only supports x86_64 and aarch64"
 #endif
 
-/* The specification's system-call denylist, expressed as numeric IDs. */
+/* The specification's dangerous-operation denylist, expressed as kernel syscall IDs. */
 static const int denied_syscalls[] = {
     __NR_ptrace,
     __NR_mount,
@@ -745,7 +824,7 @@ static const int denied_syscalls[] = {
  */
 int container_seccomp(void)
 {
-    /* Four setup instructions, two per denied call, and one final allow. */
+    /* Reserve enough BPF instructions to inspect architecture, inspect syscall, deny each entry, then allow the rest. */
     struct sock_filter filter[4 + 2 * NUM_DENIED_SYSCALLS + 1];
 
     /* count is both the next array index and final instruction count. */
@@ -760,7 +839,7 @@ int container_seccomp(void)
     filter[count++] = (struct sock_filter)BPF_JUMP(
         BPF_JMP | BPF_JEQ | BPF_K, OUR_AUDIT_ARCH, 1, 0);
 
-    /* A foreign ABI could reinterpret syscall numbers, so kill it. */
+    /* A foreign ABI could reinterpret syscall numbers and bypass the list, so reject it entirely. */
     filter[count++] = (struct sock_filter)BPF_STMT(
         BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
 
@@ -769,8 +848,9 @@ int container_seccomp(void)
         BPF_LD | BPF_W | BPF_ABS,
         offsetof(struct seccomp_data, nr));
 
-    /* Add one compare-and-deny instruction pair for every denied syscall. */
-    for (size_t i = 0; i < NUM_DENIED_SYSCALLS; i++) {
+    /* Compare every attempted syscall because the filter must reject only this targeted denylist. */
+    for (size_t i = 0; i < NUM_DENIED_SYSCALLS; i++)
+    {
         /* On no match skip one instruction; on match execute the EPERM return. */
         filter[count++] = (struct sock_filter)BPF_JUMP(
             BPF_JMP | BPF_JEQ | BPF_K,
@@ -782,7 +862,7 @@ int container_seccomp(void)
             SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA));
     }
 
-    /* A syscall that matched no deny entry is allowed to execute. */
+    /* Allow non-denied calls so ordinary commands can still read, write, allocate, and exit. */
     filter[count++] = (struct sock_filter)BPF_STMT(
         BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
 
@@ -792,14 +872,16 @@ int container_seccomp(void)
         .filter = filter,
     };
 
-    /* Unprivileged filter installation requires the irreversible NNP promise. */
-    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) {
+    /* no_new_privs is required here and also stops later exec from gaining privileges around the filter. */
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0)
+    {
         fprintf(stderr, "container: set no_new_privs: %s\n", strerror(errno));
         return -1;
     }
 
     /* Install the filter through the kernel syscall interface. */
-    if (syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, 0, &program) < 0) {
+    if (syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, 0, &program) < 0)
+    {
         fprintf(stderr, "container: install seccomp filter: %s\n",
                 strerror(errno));
         return -1;
@@ -815,7 +897,7 @@ int container_seccomp(void)
  */
 static int status_to_exit_code(int status)
 {
-    /* Example: a command that runs "exit 7" becomes result 7 for the host. */
+    /* Example: preserve `exit 7` so the invoking host shell receives result 7. */
     /* A normal exit stores the program's 0-255 code in the encoded status. */
     if (WIFEXITED(status))
         return WEXITSTATUS(status);
@@ -846,7 +928,8 @@ int container_init(struct container *c)
      * then writes one byte.  Until that byte arrives, init cannot start setup
      * with incomplete host-side configuration.
      */
-    if (read(c->sync[0], &release_byte, 1) != 1) {
+    if (read(c->sync[0], &release_byte, 1) != 1)
+    {
         fprintf(stderr, "container: parent did not release the container\n");
         return 1;
     }
@@ -858,15 +941,17 @@ int container_init(struct container *c)
     if (container_setup(c) < 0)
         return 1;
 
-    /* Create a separate command process so this process can remain PID 1. */
+    /* Fork the command so this process remains PID 1 to reap orphaned descendants and avoid zombie buildup. */
     pid_t command_pid = fork();
-    if (command_pid < 0) {
+    if (command_pid < 0)
+    {
         fprintf(stderr, "container: fork: %s\n", strerror(errno));
         return 1;
     }
 
     /* fork() returns zero only in the newly created command child. */
-    if (command_pid == 0) {
+    if (command_pid == 0)
+    {
         /* Replace this process image with the requested executable and args. */
         execvp(c->argv[0], c->argv);
 
@@ -878,14 +963,16 @@ int container_init(struct container *c)
         _exit(127);
     }
 
-    /* Remain PID 1 and repeatedly collect exited children/adopted orphans. */
-    for (;;) {
+    /* Remain PID 1 and reap every child because orphaned processes are adopted by PID 1 in this namespace. */
+    for (;;)
+    {
         /* waitpid writes an encoded reason/status into this variable. */
         int status;
 
         /* PID -1 means wait for any child, including an adopted orphan. */
         pid_t reaped = waitpid(-1, &status, 0);
-        if (reaped < 0) {
+        if (reaped < 0)
+        {
             /* A signal interrupted the wait before completion; simply retry. */
             if (errno == EINTR)
                 continue;
@@ -894,7 +981,7 @@ int container_init(struct container *c)
             return 1;
         }
 
-        /* Ignore other reaped descendants; stop when the main command exits. */
+        /* Reap other descendants for cleanup, but return only when the requested command itself exits. */
         if (reaped == command_pid)
             return status_to_exit_code(status);
     }
@@ -918,20 +1005,22 @@ static int child_entry(void *arg)
  */
 int container_run(struct container *c)
 {
-    /* Create the cgroup before a child exists so failure is easy to clean up. */
+    /* Create the cgroup before clone so no unbounded child can run if cgroup setup fails. */
     if (container_cgroup_init(c) < 0)
         return 1;
 
-    /* Create sync[0] for reading and sync[1] for writing. */
-    if (pipe(c->sync) < 0) {
+    /* Create a synchronization pipe so the child cannot run before its host-side identity and limits exist. */
+    if (pipe(c->sync) < 0)
+    {
         fprintf(stderr, "container: pipe: %s\n", strerror(errno));
         container_cleanup(c);
         return 1;
     }
 
-    /* clone() needs caller-provided stack memory for the child callback. */
+    /* clone() starts a callback rather than duplicating this call stack, so it needs a separate child stack. */
     char *stack = malloc(CONTAINER_STACK_SIZE);
-    if (stack == NULL) {
+    if (stack == NULL)
+    {
         fprintf(stderr, "container: out of memory for the child stack\n");
         close(c->sync[0]);
         close(c->sync[1]);
@@ -946,7 +1035,8 @@ int container_run(struct container *c)
      */
     pid_t child = clone(child_entry, stack + CONTAINER_STACK_SIZE,
                         container_namespaces() | SIGCHLD, c);
-    if (child < 0) {
+    if (child < 0)
+    {
         fprintf(stderr, "container: clone: %s\n", strerror(errno));
         free(stack);
         close(c->sync[0]);
@@ -955,21 +1045,22 @@ int container_run(struct container *c)
         return 1;
     }
 
-    /* Record success/failure rather than returning while the child is blocked. */
+    /* Keep tracking setup instead of returning early, because the blocked child still needs pipe closure and reaping. */
     int setup_ok = (container_write_idmaps(c, child) == 0);
 
-    /* Short-circuit: enter the cgroup only if ID mapping succeeded. */
+    /* Do not continue setup after an ID-map failure; the child must never run partly configured. */
     setup_ok = setup_ok && (container_cgroup_enter(c, child) == 0);
 
     /* Provided code creates bridge/veth and moves one end into the child's netns. */
     if (c->net_enabled)
         (void)container_net_host_setup(c, child);
 
-    /* Parent writes, so close its unused copy of the pipe's read end. */
+    /* Close the parent's read end so EOF correctly reaches the child if setup fails. */
     close(c->sync[0]);
 
     /* One arbitrary byte releases init only after required parent setup succeeds. */
-    if (setup_ok && write(c->sync[1], "x", 1) != 1) {
+    if (setup_ok && write(c->sync[1], "x", 1) != 1)
+    {
         fprintf(stderr, "container: release child: %s\n", strerror(errno));
         setup_ok = 0;
     }
@@ -980,12 +1071,14 @@ int container_run(struct container *c)
      */
     close(c->sync[1]);
 
-    /* Receive the clone child's encoded exit reason. */
+    /* Wait for the clone child so cleanup happens only after it cannot use its stack or cgroup. */
     int status;
 
     /* Retry if a signal interrupts waitpid before it reaps the specific child. */
-    while (waitpid(child, &status, 0) < 0) {
-        if (errno != EINTR) {
+    while (waitpid(child, &status, 0) < 0)
+    {
+        if (errno != EINTR)
+        {
             fprintf(stderr, "container: waitpid: %s\n", strerror(errno));
             free(stack);
             return 1;
@@ -999,7 +1092,7 @@ int container_run(struct container *c)
     if (c->net_enabled)
         (void)container_net_host_teardown(c);
 
-    /* Remove the now-empty cgroup; cleanup must not replace command status. */
+    /* Remove the cgroup after its last process exits; retain the command result even if cleanup has trouble. */
     (void)container_cleanup(c);
 
     /* If parent setup failed, the command never validly ran. */
@@ -1021,8 +1114,15 @@ int container_cleanup(struct container *c)
     if (c->cg_path[0] == '\0')
         return 0;
 
-    /* rmdir removes an empty cgroup; already absent (ENOENT) is also success. */
-    if (rmdir(c->cg_path) < 0 && errno != ENOENT) {
+    /*
+     * rmdir removes an empty cgroup; ENOENT also means there is nothing left to
+     * clean. If it is not empty, rmdir fails (normally because a process or a
+     * child cgroup still remains) and this function reports the failure. In the
+     * normal path, init has exited and its PID namespace's remaining processes
+     * have been terminated, so the cgroup should be empty by this point.
+     */
+    if (rmdir(c->cg_path) < 0 && errno != ENOENT)
+    {
         fprintf(stderr, "container: remove cgroup %s: %s\n",
                 c->cg_path, strerror(errno));
         return -1;

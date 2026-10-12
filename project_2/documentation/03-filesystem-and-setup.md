@@ -91,6 +91,23 @@ rootfs, and make the old host root unreachable.
 
 **Used by:** `container_setup()`.
 
+### The goal before the code
+
+Before this function, the child is still looking at the host filesystem.
+`rootfs` is a host directory containing the small filesystem image for the
+container, such as `/images/miniroot`. This function makes that directory look
+like `/` to the command, then removes the old host root so the command cannot
+walk back to host files.
+
+A **mount** tells Linux which filesystem should appear at a path. Before the
+root switch, the code prepares three mounts below the host path `rootfs`:
+
+| Host path before the switch | Path the command sees afterward | Why it exists |
+| --- | --- | --- |
+| `<rootfs>/tmp` | `/tmp` | writable throwaway working space |
+| `<rootfs>/dev` | `/dev` | only the two safe device files the project needs |
+| `<rootfs>/proc` | `/proc` | process information for this container's PID view |
+
 ### Complete sequence and code explanation
 
 ```c
@@ -109,11 +126,14 @@ static int setup_filesystem(const char *rootfs)
     }
 ```
 
-- This recursively changes mount propagation under `/` to private.
-- `MS_REC` applies the change through the mount tree.
-- `MS_PRIVATE` prevents later mounts/unmounts in this namespace from propagating
-  to peers outside it. A mount namespace alone is not sufficient if propagation
-  relationships remain shared.
+Linux can mark a mount as **shared**, which means a new mount below it can be
+copied to a peer mount in another mount namespace. That would be dangerous here:
+mounting a temporary filesystem at the container's `/tmp` could also alter the
+host's mount layout. `MS_PRIVATE` turns off that forwarding. `MS_REC` applies
+the setting to `/` and every mount below it, rather than protecting only `/`.
+
+So the namespace gives the child a separate mount table, and this call makes
+sure later changes to that table stay in the child.
 
 ```c
     if (mount(rootfs, rootfs, NULL, MS_BIND | MS_REC, NULL) < 0) {
@@ -126,10 +146,12 @@ static int setup_filesystem(const char *rootfs)
 ```
 
 - `pivot_root()` requires the new root to be a mount point. Bind-mounting the
-  directory onto itself turns it into one.
+  directory onto itself turns it into one; it does not copy the files.
 - `MS_REC` includes nested mounts.
 - The second call remounts that bind read-only. `MS_REMOUNT` changes an existing
-  mount, and `MS_RDONLY` removes ordinary write access to the image.
+  mount, and `MS_RDONLY` removes ordinary write access to the image. This keeps
+  a command from changing supplied programs or configuration in the rootfs,
+  while the next step still gives it a safe place to write temporary files.
 
 ```c
     snprintf(path, sizeof path, "%s/tmp", rootfs);
@@ -138,9 +160,17 @@ static int setup_filesystem(const char *rootfs)
     }
 ```
 
-- The root is read-only, but programs need scratch space. A new in-memory tmpfs
-  mounted at `/tmp` provides an empty writable area without changing the image.
-- The first and third `"tmpfs"` identify the source label and filesystem type.
+`/tmp` is the conventional location for short-lived working files. For example,
+an editor may write a temporary save file there; a program may create a lock,
+socket, or intermediate output there. Those files should not change the
+container image or be kept for the next run.
+
+A **tmpfs** is a fresh filesystem whose contents live in memory (and may use
+swap), rather than in the rootfs image. This call mounts an empty tmpfs at
+`<rootfs>/tmp`. Before `pivot_root`, that is the host-visible preparation path;
+afterward, the same mount is what the command calls `/tmp`. It is writable even
+though `/` is read-only, and it disappears when the container ends. The first
+and third `"tmpfs"` identify the source label and filesystem type.
 
 ```c
     snprintf(path, sizeof path, "%s/dev", rootfs);
@@ -152,9 +182,14 @@ static int setup_filesystem(const char *rootfs)
         return -1;
 ```
 
-- A fresh `/dev` avoids exposing every host device.
+- `/dev` contains special files that connect programs to kernel or hardware
+  services. A fresh `/dev` avoids exposing host disks, terminals, and other
+  sensitive devices.
 - User-namespace root cannot use `mknod()` to construct these device nodes, so
   the implementation exposes only the safe, needed host nodes through binds.
+- `/dev/null` accepts and discards bytes; `/dev/zero` supplies zero bytes. They
+  are common basic devices and are the only ones this project intentionally
+  makes visible.
 - If either device bind fails, setup stops rather than continuing with an
   incomplete `/dev`.
 
@@ -165,8 +200,10 @@ static int setup_filesystem(const char *rootfs)
     }
 ```
 
-- A fresh proc filesystem reflects the current PID namespace. Without it,
-  `/proc` could still describe host processes even though PID lookup is isolated.
+- `/proc` is a kernel-provided virtual filesystem; commands such as `ps` read it
+  to learn which processes exist. A fresh proc filesystem reflects the current
+  PID namespace. Without it, `/proc` could still describe host processes even
+  though PID lookup is isolated.
 - This must happen before detaching the old root; under these user-namespace
   rules, mounting proc after losing the old proc view can fail with `EPERM`.
 
@@ -181,14 +218,16 @@ static int setup_filesystem(const char *rootfs)
 }
 ```
 
-- `chdir(rootfs)` makes the desired root the current directory.
+- `chdir(rootfs)` makes the desired root the current directory. The code uses
+  `.` below because it now names that exact prepared rootfs mount.
 - glibc does not provide a normal `pivot_root()` wrapper, so `syscall()` invokes
   kernel operation `SYS_pivot_root` directly.
-- Using `"."` for both new root and old-root attachment stacks the old root at
-  the current location after the pivot.
-- `umount2(".", MNT_DETACH)` lazily detaches that old root, removing the path by
-  which the container could reach host files.
-- `chdir("/")` moves to the new root directory.
+- Using `"."` for both new root and old-root attachment temporarily stacks the
+  old host root at the current location after the pivot.
+- `umount2(".", MNT_DETACH)` lazily detaches that old root, removing the route
+  by which the container could otherwise reach host files.
+- `chdir("/")` moves to the new root directory so later relative paths begin
+  inside the container rather than at the detached mount point.
 
 The order is essential: privilege is still available, proc is mounted before
 the pivot, and the old root is detached only after the switch succeeds.
