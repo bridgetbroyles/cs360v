@@ -81,34 +81,32 @@
 
 /*
  * REQUIRED FUNCTION: container_namespaces
- * Called by container_run() when it creates container init with clone().
- * Returns one bitmask selecting the five isolated resource views.
+ * - Used by container_run() when clone() creates container init.
+ * - Returns one bitmask selecting five isolated resource views.
  */
 int container_namespaces(void)
 {
     /*
-     * Bitwise OR combines independent flags; it does not choose only one.
-     * USER creates a new identity view. In that view ("inside the container"),
-     * the process can be UID 0; outside it, the host still treats the same
-     * process as the ordinary account that launched the container.
-     * PID gives the child its own process tree, where it becomes PID 1. Thus a
-     * process listing inside shows container processes, not unrelated host ones.
-     * NEWNS gives it a private mount table: mounts it creates for /proc, /tmp,
-     * or the new root affect only its view, not the host's filesystem view.
-     * UTS gives it a separate hostname, so programs can use a container name
-     * for configuration or identification without changing the host name.
-     * NET gives it separate interfaces, addresses, and routes for --net mode.
+     * Bitwise OR combines every flag; it does not select only one.
+     * - USER: separate identity view. UID 0 inside still maps to the ordinary
+     *   account that launched the container on the host.
+     * - PID: separate process tree. Init becomes PID 1; unrelated host
+     *   processes do not appear in the container's process list.
+     * - NEWNS: separate mount table. Changes to /proc, /tmp, and the root
+     *   filesystem affect the container's view, not the host's view.
+     * - UTS: separate hostname. Naming the container does not rename the host.
+     * - NET: separate interfaces, addresses, and routes for --net mode.
      */
     return CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWNET;
 }
 
 /*
  * REQUIRED FUNCTION: container_write_idmaps
- * Called by the host parent after clone() and before releasing the child.
- * Maps the child’s container-local UID/GID 0 to the caller's ordinary host IDs.
- * "Inside" means the child is asking the kernel for an identity through its new
- * user namespace. "Host" means the kernel is checking the same process against
- * the real machine's users and files. The map connects those two number spaces.
+ * - Used by the host parent after clone() and before releasing the child.
+ * - Maps container-local UID/GID 0 to the caller's ordinary host IDs.
+ * - "Inside": identity seen through the child's new user namespace.
+ * - "Host": identity used against the real machine's users and files.
+ * - The ID map connects those two number spaces.
  */
 int container_write_idmaps(struct container *c, pid_t child)
 {
@@ -123,10 +121,13 @@ int container_write_idmaps(struct container *c, pid_t child)
     snprintf(path, sizeof path, "/proc/%d/uid_map", (int)child);
 
     /*
-     * A uid_map line has: <container starting UID> <host starting UID> <count>.
-     * If getuid() returns 1000, this writes "0 1000 1": the one container
-     * identity numbered 0 maps to the one host identity numbered 1000. UID 0
-     * is called root inside the container, but it does not become host root.
+     * uid_map format:
+     *   <container starting UID> <host starting UID> <number of IDs>
+     * Example when getuid() returns 1000:
+     *   "0 1000 1"
+     *   - Container UID 0 maps to host UID 1000.
+     *   - One ID is mapped.
+     *   - UID 0 is container root, not host root.
      */
     snprintf(mapping, sizeof mapping, "0 %d 1", (int)getuid());
 
@@ -135,18 +136,21 @@ int container_write_idmaps(struct container *c, pid_t child)
         return -1;
 
     /*
-     * Linux requires this before an unprivileged process may write gid_map.
-     * Supplementary groups can carry extra file permissions. Denying setgroups
-     * makes the child give up changing them before its group mapping is set.
+     * Why write "deny" before gid_map?
+     * - Linux requires it for an unprivileged gid_map write.
+     * - Supplementary groups may carry extra file permissions.
+     * - Denying setgroups prevents the child from retaining or adding them.
      */
     snprintf(path, sizeof path, "/proc/%d/setgroups", (int)child);
     if (write_file(path, "deny") < 0)
         return -1;
 
     /*
-     * gid_map has the same three-number format. If getgid() is 1000, "0 1000
-     * 1" means container group 0 corresponds to host group 1000. This keeps
-     * group permission checks as restricted as the UID mapping.
+     * gid_map uses the same three-number format.
+     * Example when getgid() returns 1000:
+     *   "0 1000 1" maps container GID 0 to host GID 1000.
+     * Result:
+     *   Group permission checks remain as restricted as the UID mapping.
      */
     snprintf(path, sizeof path, "/proc/%d/gid_map", (int)child);
     snprintf(mapping, sizeof mapping, "0 %d 1", (int)getgid());
@@ -159,8 +163,9 @@ int container_write_idmaps(struct container *c, pid_t child)
 
 /*
  * ADDED HELPER: write_cgroup_limit
- * Called by container_cgroup_init() for each cgroup limit file.
- * Cgroup controls accept text, so this converts a long to decimal or "max".
+ * - Used by container_cgroup_init() for each cgroup limit file.
+ * - Converts a numeric limit to the text cgroup control files expect.
+ * - Writes "max" for an unlimited negative value.
  */
 static int write_cgroup_limit(struct container *c,
                               const char *file_name, long limit)
@@ -172,10 +177,11 @@ static int write_cgroup_limit(struct container *c,
     char value[32];
 
     /*
-     * container_cgroup_init() already saved this container's directory in
-     * c->cg_path. Append the requested control-file name: for example,
-     * /sys/fs/cgroup/demo plus memory.max becomes
-     * /sys/fs/cgroup/demo/memory.max, the file that holds the memory limit.
+     * Build the control-file path:
+     * - c->cg_path was saved by container_cgroup_init().
+     * - Example directory: /sys/fs/cgroup/demo
+     * - Example file: memory.max
+     * - Result: /sys/fs/cgroup/demo/memory.max
      */
     snprintf(path, sizeof path, "%s/%s", c->cg_path, file_name);
 
@@ -192,9 +198,9 @@ static int write_cgroup_limit(struct container *c,
 
 /*
  * REQUIRED FUNCTION: container_cgroup_init
- * Called first by container_run() in the parent.
- * Creates this container's control group and applies process/memory limits.
- *
+ * - Called first by container_run() in the host parent.
+ * - Creates the container's cgroup directory.
+ * - Applies process, memory, and swap limits.
  */
 int container_cgroup_init(struct container *c)
 {
@@ -209,24 +215,23 @@ int container_cgroup_init(struct container *c)
         return -1;
 
     /*
-     * Save this container's cgroup-directory path in c->cg_path. For example,
-     * base /sys/fs/cgroup plus name demo becomes /sys/fs/cgroup/demo. The next
-     * function appends /cgroup.procs to this saved path; cleanup later removes
-     * this same directory.
+     * Save the cgroup directory in c->cg_path.
+     * - Base: /sys/fs/cgroup
+     * - Container name: demo
+     * - Saved result: /sys/fs/cgroup/demo
+     * - container_cgroup_enter() later appends /cgroup.procs.
+     * - container_cleanup() later removes this directory.
      */
     snprintf(c->cg_path, sizeof c->cg_path, "%s/%s",
              c->cgroup_base, c->name);
 
     /*
-     * Example: base /sys/fs/cgroup and name demo produce
-     * /sys/fs/cgroup/demo, the directory that will contain this container's
-     * pids.max and memory.max files.  EEXIST permits reuse after a crash left
-     * that directory behind.
-     */
-    /*
-     * 0755 is the directory's ordinary read/traverse permission mode. It does
-     * not set the process or memory limits; the cgroup control files below it
-     * do that. The kernel manages access to those control files separately.
+     * Create the saved directory.
+     * - It holds controls such as pids.max and memory.max.
+     * - EEXIST is allowed because a crash may leave the directory behind.
+     * - 0755 supplies ordinary directory read/traverse permissions.
+     * - 0755 does not define resource limits; the control files do.
+     * - The kernel manages permissions on those control files separately.
      */
     if (mkdir(c->cg_path, 0755) < 0 && errno != EEXIST)
     {
@@ -252,8 +257,9 @@ int container_cgroup_init(struct container *c)
 
 /*
  * REQUIRED FUNCTION: container_cgroup_enter
- * Called by container_run() before releasing the child.
- * Moves container init into the cgroup; its future descendants inherit it.
+ * - Used by container_run() before releasing the child.
+ * - Moves container init into the limited cgroup.
+ * - Every future descendant inherits that cgroup membership.
  */
 int container_cgroup_enter(struct container *c, pid_t child)
 {
@@ -265,17 +271,17 @@ int container_cgroup_enter(struct container *c, pid_t child)
     snprintf(path, sizeof path, "%s/cgroup.procs", c->cg_path);
 
     /*
-     * cgroup.procs expects decimal text, not the in-memory binary pid_t. For a
-     * child whose host PID is 4312, this turns the number into "4312" so that
-     * write_file() can place those four characters in cgroup.procs.
+     * Convert the PID to the text cgroup.procs expects.
+     * - In memory: binary pid_t value 4312
+     * - Written value: the four characters "4312"
      */
     snprintf(pid_text, sizeof pid_text, "%d", (int)child);
 
     /*
-     * Writing the host PID moves init into the limited group. Init is the
-     * clone() child that becomes PID 1 in the container's separate PID view.
-     * Example: writing 4312 to /sys/fs/cgroup/demo/cgroup.procs places that
-     * process in demo. Commands it later forks inherit demo's limits.
+     * Effect of writing the host PID:
+     * - Init is the clone() child and PID 1 in the container's PID view.
+     * - Writing 4312 to /sys/fs/cgroup/demo/cgroup.procs places init in demo.
+     * - Commands init later forks inherit demo's limits.
      */
 
     return write_file(path, pid_text);
@@ -283,11 +289,11 @@ int container_cgroup_enter(struct container *c, pid_t child)
 
 /*
  * ADDED HELPER: bind_device
- * Called twice by setup_filesystem(), for /dev/null and /dev/zero.
- * Creates a mount target and overlays the corresponding host device there.
- *
- * dev/null is used in linux for discarding output streams and as a dev/zero is
- * source of empty input streams. devices expected to exist in linux
+ * - Used twice by setup_filesystem(): once for null and once for zero.
+ * - Creates a target below the future rootfs.
+ * - Bind-mounts the matching host device onto that target.
+ * - /dev/null discards output written to it.
+ * - /dev/zero supplies an endless stream of zero bytes.
  */
 static int bind_device(const char *rootfs, const char *name)
 {
@@ -296,16 +302,20 @@ static int bind_device(const char *rootfs, const char *name)
     char target_path[PATH_MAX];
 
     /*
-     * Build both sides of the bind mount. For name "null", host_path is the
-     * existing host device /dev/null; target_path is the empty file at
-     * <rootfs>/dev/null that will become /dev/null after changing root.
+     * Build both sides of the bind mount for name "null":
+     * - Source: host /dev/null
+     * - Target now: <rootfs>/dev/null
+     * - Target after pivot_root(): container /dev/null
      */
     snprintf(host_path, sizeof host_path, "/dev/%s", name);
     snprintf(target_path, sizeof target_path, "%s/dev/%s", rootfs, name);
 
     /*
-     * A bind mount needs an existing destination. O_CREAT makes the empty file;
-     * O_CLOEXEC prevents this descriptor leaking if an exec unexpectedly occurs.
+     * Prepare the target:
+     * - A bind mount requires an existing destination file.
+     * - O_CREAT creates that empty placeholder.
+     * - O_CLOEXEC prevents this descriptor from leaking through exec.
+     * 0666 sets the file permissions to allow read and write access for all users.
      */
     int fd = open(target_path, O_CREAT | O_WRONLY | O_CLOEXEC, 0666);
     if (fd < 0)
@@ -319,10 +329,10 @@ static int bind_device(const char *rootfs, const char *name)
     close(fd);
 
     /*
-     * MS_BIND makes the existing host device appear at target_path. After the
-     * root switch, the command can use /dev/null and /dev/zero normally. This
-     * avoids creating new device nodes, an operation this unprivileged user
-     * namespace is not permitted to perform.
+     * Bind the real device onto the placeholder:
+     * - MS_BIND makes the host device appear at target_path.
+     * - After the root switch, the command sees normal /dev/null or /dev/zero.
+     * - No new device node is created; this user namespace cannot use mknod().
      */
     if (mount(host_path, target_path, NULL, MS_BIND, NULL) < 0)
     {
@@ -336,22 +346,28 @@ static int bind_device(const char *rootfs, const char *name)
 
 /*
  * ADDED HELPER: setup_filesystem
- * Called by container_setup() while init still has mount capabilities.
- * Constructs the private filesystem and makes rootfs become container `/`.
+ * - Used by container_setup() while init still has mount capabilities.
+ * - Constructs the container's private mount layout.
+ * - Makes rootfs become `/` for the container.
+ * - Detaches the old host root so it cannot remain reachable.
  */
 static int setup_filesystem(const char *rootfs)
 {
     /*
-     * Temporary buffer for building paths inside rootfs.
-     * For example, if rootfs is "/images/miniroot", path can hold
-     * "/images/miniroot/tmp" or "/images/miniroot/dev".
+     * Temporary path buffer.
+     * Example rootfs: /images/miniroot
+     * Possible values:
+     * - /images/miniroot/tmp
+     * - /images/miniroot/dev
+     * - /images/miniroot/proc
      */
     char path[PATH_MAX];
 
     /*
-     * Stop mount changes made by this container from propagating to
-     * the host or other mount namespaces. This keeps the container's
-     * filesystem mount changes separate from the host's.
+     * Isolate mount propagation:
+     * - MS_PRIVATE stops container mount changes from reaching peer mounts.
+     * - MS_REC applies that rule to `/` and every mount below it.
+     * - Result: container mount/unmount operations do not alter the host view.
      */
     if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) < 0)
     {
@@ -360,9 +376,10 @@ static int setup_filesystem(const char *rootfs)
     }
 
     /*
-     * Make rootfs a mount point. pivot_root() requires the new root
-     * to be a mount point, not just an ordinary directory.
-     * A mount point is a directory that is used as an access point to a mounted filesystem. In this case, rootfs is being made a mount point so that it can be used as the new root filesystem for the container.
+     * Make rootfs eligible to become `/`:
+     * - pivot_root() requires a mount point, not an ordinary directory.
+     * - A mount point is the path where a mounted filesystem is accessed.
+     * - Bind-mounting rootfs onto itself turns it into that required mount point.
      */
     if (mount(rootfs, rootfs, NULL, MS_BIND | MS_REC, NULL) < 0)
     {
@@ -371,10 +388,10 @@ static int setup_filesystem(const char *rootfs)
     }
 
     /*
-     * Make the root filesystem read-only so the container cannot
-     * modify the files stored in the original rootfs image.
-     * We will create separate writable areas for temporary files
-     * and devices below.
+     * Protect the rootfs image:
+     * - Remount it read-only.
+     * - The command cannot change supplied programs or configuration.
+     * - Separate writable tmpfs mounts are added for temporary files/devices.
      */
     if (mount(NULL, rootfs, NULL,
               MS_BIND | MS_REMOUNT | MS_RDONLY, NULL) < 0)
@@ -385,9 +402,10 @@ static int setup_filesystem(const char *rootfs)
     }
 
     /*
-     * Build the path to the directory that will become /tmp inside
-     * the container. Mounting tmpfs here gives the container a
-     * writable temporary directory even though rootfs is read-only.
+     * Prepare writable temporary storage:
+     * - <rootfs>/tmp becomes /tmp after pivot_root().
+     * - Programs use /tmp for short-lived scratch files.
+     * - tmpfs is memory-backed and remains writable while rootfs is read-only.
      */
     snprintf(path, sizeof path, "%s/tmp", rootfs);
 
@@ -398,9 +416,10 @@ static int setup_filesystem(const char *rootfs)
     }
 
     /*
-     * Build the path to the directory that will become /dev.
-     * Mount a fresh tmpfs here instead of exposing the host's /dev,
-     * which contains devices the container should not automatically access.
+     * Prepare a minimal device directory:
+     * - <rootfs>/dev becomes /dev after pivot_root().
+     * - A fresh tmpfs begins empty and writable.
+     * - The host's full /dev stays hidden because it contains sensitive devices.
      */
     snprintf(path, sizeof path, "%s/dev", rootfs);
 
@@ -411,17 +430,18 @@ static int setup_filesystem(const char *rootfs)
     }
 
     /*
-     * Add the two devices this project needs to the new /dev.
-     * bind_device() makes the host's real devices available at
-     * rootfs/dev/null and rootfs/dev/zero.
+     * Add only the two required devices:
+     * - bind_device(..., "null") exposes /dev/null.
+     * - bind_device(..., "zero") exposes /dev/zero.
      */
     if (bind_device(rootfs, "null") < 0 || bind_device(rootfs, "zero") < 0)
         return -1;
 
     /*
-     * Build the path to the directory that will become /proc.
-     * Mounting proc gives programs access to process information,
-     * such as the information used by commands like ps.
+     * Prepare the process-information filesystem:
+     * - <rootfs>/proc becomes /proc after pivot_root().
+     * - A fresh proc mount reflects this PID namespace.
+     * - Commands such as ps read process information from it.
      */
     snprintf(path, sizeof path, "%s/proc", rootfs);
 
@@ -432,9 +452,9 @@ static int setup_filesystem(const char *rootfs)
     }
 
     /*
-     * Enter rootfs so "." refers to the directory that will become
-     * the container's new root.
-     * chdir changes the current working directory of the process to rootfs. This is necessary because pivot_root() requires the new root filesystem to be the current working directory.
+     * Make rootfs the current directory:
+     * - After chdir(rootfs), `.` refers to the prepared rootfs mount.
+     * - pivot_root() below uses `.` as its new-root argument.
      */
     if (chdir(rootfs) < 0)
     {
@@ -443,8 +463,9 @@ static int setup_filesystem(const char *rootfs)
     }
 
     /*
-     * Switch the process's root filesystem to rootfs.
-     * After this succeeds, the container sees rootfs as its /.
+     * Switch roots:
+     * - rootfs becomes `/` for this process.
+     * - The container now resolves absolute paths inside the supplied image.
      */
     if (syscall(SYS_pivot_root, ".", ".") < 0)
     {
@@ -453,8 +474,10 @@ static int setup_filesystem(const char *rootfs)
     }
 
     /*
-     * Detach the old root filesystem so the container cannot keep
-     * accessing the host's old filesystem through the previous root.
+     * Remove the old-root escape path:
+     * - pivot_root() temporarily leaves the old root attached.
+     * - MNT_DETACH disconnects it.
+     * - The container can no longer reach host files through the former root.
      */
     if (umount2(".", MNT_DETACH) < 0)
     {
@@ -463,8 +486,9 @@ static int setup_filesystem(const char *rootfs)
     }
 
     /*
-     * Set the working directory to the new root. This ensures that
-     * relative paths used by later code start from the container's /.
+     * Finish in the new root:
+     * - Set the working directory to `/`.
+     * - Later relative paths begin inside the container filesystem.
      */
     if (chdir("/") < 0)
     {
@@ -477,27 +501,26 @@ static int setup_filesystem(const char *rootfs)
 
 /*
  * ADDED HELPER: drop_capabilities
- * Called near the end of container_setup().
- * Removes every category of root power and prevents privilege recovery.
- *
- * why do we need to do this ?
- * Because even though the process is running as UID 0 inside the container, it is still running as an unprivileged user on the host. If we do not drop capabilities, the process could potentially regain privileges through setuid binaries or other mechanisms. Dropping capabilities ensures that the process cannot gain elevated privileges and helps maintain the isolation and security of the container.
+ * - Used near the end of container_setup().
+ * - Removes every category of root-like power.
+ * - Prevents the command from recovering privilege later.
+ * - Container UID 0 should not retain powers it needed only during setup.
+ * - setuid programs and file capabilities must not restore those powers.
  */
 static int drop_capabilities(void)
 {
     /*
-     * Try to remove every capability from the bounding set.
-     * The bounding set limits which capabilities a process can regain
-     * through certain privilege-gaining operations.
-     * CAP_LAST_CAP is the highest capability number supported by this kernel.
+     * Remove every capability from the bounding set:
+     * - The bounding set limits capabilities that can be regained later.
+     * - CAP_LAST_CAP is the highest capability number known to these headers.
      */
     for (int cap = 0; cap <= CAP_LAST_CAP; cap++)
     {
         /*
-         * cap is the capability number we are removing.
-         * PR_CAPBSET_DROP asks Linux to remove it from the bounding set.
-         * EINVAL is ignored because this capability number may not be
-         * supported by the kernel. Any other error means setup failed.
+         * For each cap number:
+         * - PR_CAPBSET_DROP removes it from the bounding set.
+         * - EINVAL means this kernel does not support that number; ignore it.
+         * - Any other error means setup failed.
          */
         if (prctl(PR_CAPBSET_DROP, cap, 0, 0, 0) < 0 && errno != EINVAL)
         {
@@ -509,35 +532,34 @@ static int drop_capabilities(void)
     }
 
     /*
-     * header describes the capability-setting request sent to Linux.
-     * data holds the actual capability sets we want the process to have.
-     * Two records are used because capability API version 3 stores
-     * capability bits in two 32-bit groups.
+     * Capability API data:
+     * - header describes the request sent to Linux.
+     * - data holds the requested capability sets.
+     * - API version 3 uses two records for two 32-bit groups.
      */
     struct __user_cap_header_struct header;
     struct __user_cap_data_struct data[2];
 
     /*
-     * Initialize everything to zero. This makes all capability masks
-     * in data empty, meaning we are requesting no effective,
-     * permitted, or inheritable capabilities.
+     * Zero both structures:
+     * - Every mask in data becomes empty.
+     * - Requested effective capabilities: none.
+     * - Requested permitted capabilities: none.
+     * - Requested inheritable capabilities: none.
      */
     memset(&header, 0, sizeof header);
     memset(data, 0, sizeof data);
 
-    /*
-     * Tell Linux which format of the capability structures we are using.
-     */
+    /* Select capability API version 3, matching the two-record data layout. */
     header.version = _LINUX_CAPABILITY_VERSION_3;
 
-    /*
-     * PID 0 means the capability change applies to this process itself.
-     */
+    /* PID 0 applies the capability change to this calling process. */
     header.pid = 0;
 
     /*
-     * Ask Linux to replace this process's capability sets with the
-     * empty sets in data, removing the capabilities it currently holds.
+     * Apply the empty sets:
+     * - Replace this process's current capability sets with data.
+     * - Because data is zeroed, the process keeps no capabilities.
      */
     if (syscall(SYS_capset, &header, data) < 0)
     {
@@ -546,9 +568,10 @@ static int drop_capabilities(void)
     }
 
     /*
-     * Prevent this process and its future children from gaining new
-     * privileges through operations such as executing a setuid program.
-     * This setting cannot be turned off once enabled.
+     * Prevent future privilege gain:
+     * - Applies to this process and future children.
+     * - Blocks privilege gain through setuid or file-capability executables.
+     * - Cannot be turned off once enabled.
      */
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0)
     {
@@ -556,15 +579,14 @@ static int drop_capabilities(void)
         return -1;
     }
 
-    /*
-     * All capability-removal steps succeeded.
-     */
+    /* All capability-removal steps succeeded. */
     return 0;
 }
 /*
  * REQUIRED FUNCTION: container_setup
- * Called by container_init() after the parent releases it.
- * Orders all child-side isolation; privileged setup must precede restrictions.
+ * - Used by container_init() after the host parent releases it.
+ * - Performs every child-side setup step in the required order.
+ * - Privileged setup must finish before capabilities/seccomp remove access.
  */
 int container_setup(struct container *c)
 {
@@ -599,8 +621,9 @@ int container_setup(struct container *c)
 
 /*
  * REQUIRED FUNCTION: container_network
- * Called by container_setup() before CAP_NET_ADMIN is removed.
- * Turns on `lo`, the private interface used for localhost communication.
+ * - Used by container_setup() before CAP_NET_ADMIN is removed.
+ * - Activates `lo`, the container's private loopback interface.
+ * - Makes localhost communication possible inside the container.
  */
 int container_network(void)
 {
@@ -647,8 +670,9 @@ int container_network(void)
 
 /*
  * ADDED HELPER: make_ipv4_address
- * Called by container_net_config().
- * Converts dotted text into the binary IPv4 socket-address structure.
+ * - Used by container_net_config().
+ * - Converts readable IPv4 text such as 10.44.0.2.
+ * - Stores the result in the binary sockaddr format the kernel expects.
  */
 static int make_ipv4_address(struct sockaddr *addr, const char *ip_text)
 {
@@ -673,15 +697,18 @@ static int make_ipv4_address(struct sockaddr *addr, const char *ip_text)
 
 /*
  * REQUIRED FUNCTION: container_net_config
- * Called by container_setup() only in --net mode.
- * Configures the container end of the provided virtual Ethernet pair.
+ * - Used by container_setup() only in --net mode.
+ * - Configures the container end of the provided veth pair.
+ * - Assigns its address, netmask, active state, and default route.
  */
 int container_net_config(struct container *c)
 {
     /*
-     * Example --net layout: host bridge 10.44.0.1 connects to ceth0 at
-     * 10.44.0.2.  The provided host setup moved ceth0 into this namespace;
-     * this function assigns its address, activates it, and adds its route.
+     * Example --net layout:
+     * - Host bridge/gateway: 10.44.0.1
+     * - Container interface ceth0: 10.44.0.2
+     * - Provided host setup already moved ceth0 into this namespace.
+     * - This function addresses it, activates it, and adds its route.
      */
     /* Create a control socket because these ioctls need a network-kernel handle, not a packet connection. */
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -758,8 +785,10 @@ int container_net_config(struct container *c)
     memset(&route, 0, sizeof route);
 
     /*
-     * Destination 0.0.0.0 plus mask 0.0.0.0 matches all destinations; the
-     * gateway is the host bridge, normally 10.44.0.1.
+     * Build a default route:
+     * - Destination 0.0.0.0: start of the all-address range.
+     * - Mask 0.0.0.0: match every destination.
+     * - Gateway: host bridge, normally 10.44.0.1.
      */
     if (make_ipv4_address(&route.rt_dst, "0.0.0.0") < 0 ||
         make_ipv4_address(&route.rt_genmask, "0.0.0.0") < 0 ||
@@ -819,8 +848,9 @@ static const int denied_syscalls[] = {
 
 /*
  * REQUIRED FUNCTION: container_seccomp
- * Called last by container_setup().
- * Installs a kernel BPF filter that rejects dangerous syscalls with EPERM.
+ * - Called last by container_setup().
+ * - Installs a kernel BPF syscall filter.
+ * - Dangerous calls fail with EPERM; unmatched ordinary calls are allowed.
  */
 int container_seccomp(void)
 {
@@ -892,8 +922,10 @@ int container_seccomp(void)
 
 /*
  * ADDED HELPER: status_to_exit_code
- * Called after waitpid() by container_init() and container_run().
- * Converts waitpid's encoded status to a shell-style command result.
+ * - Used after waitpid() by container_init() and container_run().
+ * - Converts waitpid's encoded status to a shell-style result.
+ * - Normal exit: return its 0-255 code.
+ * - Signal death: return 128 plus the signal number.
  */
 static int status_to_exit_code(int status)
 {
@@ -912,8 +944,10 @@ static int status_to_exit_code(int status)
 
 /*
  * REQUIRED FUNCTION: container_init
- * Runs as PID 1 inside the new PID namespace.
- * Waits for parent setup, configures isolation, launches/reaps the command.
+ * - Runs as PID 1 inside the new PID namespace.
+ * - Waits until host-parent setup is complete.
+ * - Finishes child-side isolation.
+ * - Launches the requested command and reaps descendants.
  */
 int container_init(struct container *c)
 {
@@ -924,9 +958,12 @@ int container_init(struct container *c)
     close(c->sync[1]);
 
     /*
-     * Example order: the parent writes the ID maps and cgroup membership,
-     * then writes one byte.  Until that byte arrives, init cannot start setup
-     * with incomplete host-side configuration.
+     * Synchronization order:
+     * - Parent writes UID/GID maps.
+     * - Parent adds init to the cgroup.
+     * - Parent optionally prepares host networking.
+     * - Parent writes one byte.
+     * - Until that byte arrives, init cannot run partly configured.
      */
     if (read(c->sync[0], &release_byte, 1) != 1)
     {
@@ -989,8 +1026,10 @@ int container_init(struct container *c)
 
 /*
  * ADDED HELPER: child_entry
- * Passed to clone() by container_run().
- * Adapts clone's required int(void *) callback to container_init's typed input.
+ * - Passed to clone() by container_run().
+ * - clone() requires an int(void *) callback.
+ * - Converts that generic pointer back to struct container *.
+ * - Forwards execution and the exit code to/from container_init().
  */
 static int child_entry(void *arg)
 {
@@ -1000,8 +1039,10 @@ static int child_entry(void *arg)
 
 /*
  * REQUIRED FUNCTION: container_run
- * The only container.c function called directly by provided main.c.
- * Owns the entire host-parent lifecycle and returns the command's exit code.
+ * - The only container.c function called directly by provided main.c.
+ * - Runs as the host-side parent/coordinator.
+ * - Creates, releases, waits for, and cleans up the container.
+ * - Returns the requested command's exit code.
  */
 int container_run(struct container *c)
 {
@@ -1029,9 +1070,11 @@ int container_run(struct container *c)
     }
 
     /*
-     * Stacks grow down on supported CPUs, so pass one byte beyond the allocation.
-     * Namespace flags isolate resources; SIGCHLD enables normal parent waiting.
-     * Pointer c becomes child_entry's void * argument.
+     * clone() arguments:
+     * - stack + CONTAINER_STACK_SIZE: top of the downward-growing child stack.
+     * - container_namespaces(): resource views to isolate.
+     * - SIGCHLD: notify the parent so normal waitpid() works.
+     * - c: passed to child_entry() as its void * argument.
      */
     pid_t child = clone(child_entry, stack + CONTAINER_STACK_SIZE,
                         container_namespaces() | SIGCHLD, c);
@@ -1066,8 +1109,10 @@ int container_run(struct container *c)
     }
 
     /*
-     * Always close the write end. If setup failed and no byte was written, init
-     * sees EOF and exits instead of remaining blocked or running half-configured.
+     * Always close the parent's write end:
+     * - Success: the child already received its release byte.
+     * - Failure: no byte was written, so the child reads EOF.
+     * - EOF makes init exit instead of blocking or running half-configured.
      */
     close(c->sync[1]);
 
@@ -1105,8 +1150,9 @@ int container_run(struct container *c)
 
 /*
  * REQUIRED FUNCTION: container_cleanup
- * Called by container_run() after init has been reaped and on early failures.
- * Removes the per-container cgroup directory when it exists and is empty.
+ * - Used by container_run() after init is reaped and on early failures.
+ * - Removes the per-container cgroup directory.
+ * - The directory must already be empty.
  */
 int container_cleanup(struct container *c)
 {
@@ -1115,11 +1161,11 @@ int container_cleanup(struct container *c)
         return 0;
 
     /*
-     * rmdir removes an empty cgroup; ENOENT also means there is nothing left to
-     * clean. If it is not empty, rmdir fails (normally because a process or a
-     * child cgroup still remains) and this function reports the failure. In the
-     * normal path, init has exited and its PID namespace's remaining processes
-     * have been terminated, so the cgroup should be empty by this point.
+     * Cleanup outcomes:
+     * - Empty cgroup: rmdir removes it.
+     * - ENOENT: it is already absent, so cleanup is complete.
+     * - Nonempty cgroup: rmdir fails because a process/child cgroup remains.
+     * - Normal path: init and its PID namespace are gone, so it should be empty.
      */
     if (rmdir(c->cg_path) < 0 && errno != ENOENT)
     {
