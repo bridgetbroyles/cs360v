@@ -38,15 +38,15 @@
  *
  * FUNCTION GROUPS
  *   Namespaces/identity  container_namespaces, container_write_idmaps
- * 
+ *
  *   Resource limits      write_cgroup_limit, container_cgroup_init/enter
- * 
+ *
  *   Filesystem/security  bind_device, setup_filesystem, drop_capabilities,
  *                        container_setup, container_seccomp
- * 
+ *
  *   Networking           container_network, make_ipv4_address,
  *                        container_net_config
- * 
+ *
  *   Process lifecycle    status_to_exit_code, container_init, child_entry,
  *                        container_run, container_cleanup
  */
@@ -107,6 +107,8 @@ int container_namespaces(void)
  * - "Inside": identity seen through the child's new user namespace.
  * - "Host": identity used against the real machine's users and files.
  * - The ID map connects those two number spaces.
+ *
+ * this is the one that makes the container seem like its uid 0 w/ privilege even tho its not
  */
 int container_write_idmaps(struct container *c, pid_t child)
 {
@@ -118,6 +120,7 @@ int container_write_idmaps(struct container *c, pid_t child)
     char mapping[64];
 
     /* Build a path such as /proc/4312/uid_map for the host-visible child PID. */
+    // this is the proc that exists in the host fs not the container fs, so we can write to it from the host
     snprintf(path, sizeof path, "/proc/%d/uid_map", (int)child);
 
     /*
@@ -137,9 +140,15 @@ int container_write_idmaps(struct container *c, pid_t child)
 
     /*
      * Why write "deny" before gid_map?
-     * - Linux requires it for an unprivileged gid_map write.
-     * - Supplementary groups may carry extra file permissions.
-     * - Denying setgroups prevents the child from retaining or adding them.
+     * - setgroups() allows a process to change its supplementary groups,
+     *   which are additional groups that can grant file permissions.
+     * - Writing "deny" to /proc/<pid>/setgroups prevents the child from
+     *   changing its supplementary groups in this user namespace.
+     * - Linux requires this restriction before an unprivileged process
+     *   can write its GID map in this setup.
+     * - gid_map defines how group IDs inside the container map to group
+     *   IDs on the host. Mapping group IDs is separate from supplementary
+     *   group membership.
      */
     snprintf(path, sizeof path, "/proc/%d/setgroups", (int)child);
     if (write_file(path, "deny") < 0)
@@ -860,6 +869,7 @@ int container_seccomp(void)
     /* count is both the next array index and final instruction count. */
     size_t count = 0;
 
+    /* Load which CPU architecture this syscall is for. */
     /* Load seccomp_data.arch, the current syscall's architecture identifier. */
     filter[count++] = (struct sock_filter)BPF_STMT(
         BPF_LD | BPF_W | BPF_ABS,
@@ -1098,7 +1108,7 @@ int container_run(struct container *c)
     if (c->net_enabled)
         (void)container_net_host_setup(c, child);
 
-    /* Close the parent's read end so EOF correctly reaches the child if setup fails. */
+    /* Parent never reads from the pipe; close the unused end (hygiene only). */
     close(c->sync[0]);
 
     /* One arbitrary byte releases init only after required parent setup succeeds. */
