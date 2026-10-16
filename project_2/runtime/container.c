@@ -422,8 +422,9 @@ fail:
 }
 
 /* The audit architecture id for the CPU we're building for. */
+// we have to use 
 #if defined(__x86_64__)
-#define OUR_AUDIT_ARCH AUDIT_ARCH_X86_64
+#define OUR_AUDIT_ARCH AUDIT_ARCH_X86_64 
 #elif defined(__aarch64__)
 #define OUR_AUDIT_ARCH AUDIT_ARCH_AARCH64
 #else

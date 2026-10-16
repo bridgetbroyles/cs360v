@@ -31,6 +31,11 @@ The implementation was run in the Ubuntu VM against the official test suite:
    functions into one end-to-end story and summarizes the design decisions.
 9. [08-quiz-cheatsheet.md](08-quiz-cheatsheet.md) is a compact vocabulary,
    lifecycle, isolation, networking, and seccomp reference for the quiz.
+10. [09-interview-question-bank.md](09-interview-question-bank.md) provides
+    likely implementation, data-structure, design, and debugging questions with
+    answer checkpoints for spoken practice.
+11. [vocab.md](vocab.md) is an exhaustive Control-F reference for project
+    vocabulary, flags, structures, variables, functions, errors, and options.
 
 ## What the assignment asked us to implement
 

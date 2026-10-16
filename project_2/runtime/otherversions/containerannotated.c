@@ -102,13 +102,12 @@ int container_namespaces(void)
 
 /*
  * REQUIRED FUNCTION: container_write_idmaps
- * - Used by the host parent after clone() and before releasing the child.
- * - Maps container-local UID/GID 0 to the caller's ordinary host IDs.
- * - "Inside": identity seen through the child's new user namespace.
- * - "Host": identity used against the real machine's users and files.
- * - The ID map connects those two number spaces.
  *
  * this is the one that makes the container seem like its uid 0 w/ privilege even tho its not
+ * 
+ * REFINE:
+ * gets the path for the uidmap, set the mapping of our child to 0 so it can have root privileges inside the container, but it is still our normal user on the host, write it, write deny to setgroups so it cant get privledges from adding groups, then we map gid 0 to our host gid so it can have root privileges inside the container, but it is still our normal group on the host.
+ * 
  */
 int container_write_idmaps(struct container *c, pid_t child)
 {
@@ -515,6 +514,10 @@ static int setup_filesystem(const char *rootfs)
  * - Prevents the command from recovering privilege later.
  * - Container UID 0 should not retain powers it needed only during setup.
  * - setuid programs and file capabilities must not restore those powers.
+ * 
+ * refine
+ * removes every capability from the bounding set, 
+ * 
  */
 static int drop_capabilities(void)
 {
