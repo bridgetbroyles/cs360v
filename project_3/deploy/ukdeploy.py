@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ukdeploy: build and deploy the runner.c unikernel. *** YOU IMPLEMENT ***
+"""ukdeploy: build and deploy the runner.c unikernel.
 
     ukdeploy.py build [--arch ARCH]
     ukdeploy.py deploy [--name NAME] [--port PORT] [--arch ARCH]
@@ -99,220 +99,591 @@ def find_image(arch):
     return None
 
 
-# ---- what you implement ---------------------------------------------------
+# ---- implementation -------------------------------------------------------
 
+# TODO (implemented): remove dead QEMU instances from saved state.
 def reap_dead(state):
-    """TODO(student) Part II: remove instances whose QEMU process has exited.
+    """Remove entries whose saved QEMU PID is no longer alive and return state."""
+    # Build a separate list because changing a dictionary during iteration is unsafe.
+    dead_names = [
+        # Keep the name when its saved QEMU PID no longer belongs to a live process.
+        name
+        for name, entry in state["instances"].items()
+        if not alive(entry["pid"])
+    ]
 
-    For each entry in state["instances"], call alive(entry["pid"]). If it
-    returns False, delete that entry. Return the state.
+    # Remove each stale entry so it no longer reserves its name or port.
+    for name in dead_names:
+        # Delete the dead instance from the in-memory state dictionary.
+        del state["instances"][name]
 
-    Do not delete from a dict while looping over it: collect the dead names
-    first (e.g. in a list), then delete them."""
+    # Give the cleaned dictionary back to the command that loaded it.
     return state
 
 
+# TODO (implemented): check whether a host TCP port can be assigned.
 def port_free(port):
-    """TODO(student) Part II: return True if nothing is using `port` right now.
+    """Return True when a temporary socket can bind the requested host port."""
+    try:
+        # Create a temporary IPv4 TCP socket solely to test the requested port.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as test_socket:
+            # Allow a recently stopped instance's port to be reused promptly.
+            test_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-    Try to bind a TCP socket to it:
+            # Binding succeeds only when no other listener currently owns the port.
+            test_socket.bind(("127.0.0.1", port))
+    except OSError:
+        # A bind error means this host port cannot be assigned to a new instance.
+        return False
 
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind(("127.0.0.1", port))
-
-    If bind() raises OSError, the port is in use: return False. Otherwise
-    return True. SO_REUSEADDR makes a port that was just released by a stopped
-    instance count as free."""
+    # Reaching this point means the temporary bind succeeded and has been closed.
     return True
 
 
+# TODO (implemented): select an unused deployment port.
 def pick_port(state):
-    """TODO(student) Part II: return a free port for a new instance, or None.
+    """Return the first allowed port that is neither reserved nor in use."""
+    # Collect ports already assigned to live instances in the saved state.
+    reserved_ports = {
+        # Read the host-side forwarded port from each instance record.
+        entry["port"]
+        for entry in state["instances"].values()
+    }
 
-    Try each port in range(*PORT_RANGE) (9000 to 9099) and return the first one
-    that is:
-      - not the "port" of any entry in state["instances"], and
-      - free according to port_free().
-    Return None if no port qualifies."""
+    # Examine every allowed host port in ascending order.
+    for port in range(*PORT_RANGE):
+        # Skip a port that a saved live instance already owns.
+        if port in reserved_ports:
+            continue
+
+        # Return the first unreserved port that the operating system can bind.
+        if port_free(port):
+            return port
+
+    # None tells the caller that the complete configured range is unavailable.
     return None
 
 
+# TODO (implemented): test whether a runner answers through its forwarded port.
 def ping(port, timeout=2.0):
-    """TODO(student) Part II: return True if the runner on `port` answers PING.
+    """Send PING to the runner and return whether its response contains PONG."""
+    try:
+        # Open a short-lived TCP connection through QEMU's forwarded host port.
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout) as conn:
+            # Send one complete runner command terminated by the required newline.
+            conn.sendall(b"PING\n")
 
-      1. Connect: socket.create_connection(("127.0.0.1", port), timeout=timeout).
-      2. Send b"PING\\n" with sendall().
-      3. Read the reply with recv(64). Return True if it contains b"PONG".
+            # Read the runner's small one-line response.
+            reply = conn.recv(64)
+    except OSError:
+        # Refusal, timeout, reset, or another socket error means it is not ready.
+        return False
 
-    If any step raises OSError (refused, timed out, closed), return False."""
-    return False
+    # Only a response containing PONG proves that the runner handled the request.
+    return b"PONG" in reply
 
 
+# TODO (implemented): wait for a newly booted instance to answer PING.
 def wait_ready(port, pid, timeout=READY_TIMEOUT):
-    """TODO(student) Part II: wait until the instance answers PING.
+    """Poll until the runner responds, QEMU exits, or the timeout expires."""
+    # Convert the relative timeout into one absolute stopping time.
+    deadline = time.time() + timeout
 
-    Loop until `timeout` seconds have passed (use time.time()):
-      - if alive(pid) is False, QEMU has exited: return False;
-      - if ping(port) is True, return True;
-      - otherwise time.sleep(0.3) and try again.
-    Return False if the time runs out."""
+    # Keep trying while the caller's readiness window remains open.
+    while time.time() < deadline:
+        # Stop immediately if QEMU exited before its runner became reachable.
+        if not alive(pid):
+            return False
+
+        # A successful PING proves both forwarding and the runner are ready.
+        if ping(port):
+            return True
+
+        # Pause briefly so boot polling does not busy-loop and waste CPU.
+        time.sleep(0.3)
+
+    # The unikernel never answered before the readiness deadline.
     return False
 
+# added helper
+def qemu_command(image, arch, port):
+    """Build the exact QEMU argument list used by deploy and bench."""
+    # Look up the provided executable and CPU settings for this architecture.
+    spec = ARCHES[arch]
 
+    # Start with the arguments shared by both supported architectures.
+    argv = [
+        # Launch the QEMU executable selected for the requested architecture.
+        spec["qemu"],
+        # Boot the unikernel image directly instead of attaching a disk image.
+        "-kernel", image,
+        # Send the guest console through the log file instead of a graphical window.
+        "-nographic",
+        # Exit QEMU when the unikernel stops instead of booting it again.
+        "-no-reboot",
+        # Give this small unikernel 128 MiB of guest memory.
+        "-m", "128M",
+    ]
+
+    # Hardware acceleration is usable only for the host's own architecture and KVM.
+    kvm_available = (
+        # Cross-architecture guests cannot run through the host's KVM interface.
+        arch == host_arch()
+        # KVM must be readable and writable by the current user.
+        and os.access("/dev/kvm", os.R_OK | os.W_OK)
+    )
+
+    # Select the accelerated CPU configuration when KVM is available.
+    if kvm_available:
+        # Enable KVM and use the architecture's provided accelerated CPU model.
+        argv.extend(["-enable-kvm", "-cpu", spec["cpu"]])
+    else:
+        # Use QEMU's software-emulation CPU when acceleration is unavailable.
+        argv.extend(["-cpu", spec["fallback_cpu"]])
+
+    # Add architecture-specific options such as ARM's virt machine model.
+    argv.extend(spec.get("extra", []))
+
+    # Forward the chosen host port to the runner's fixed port inside the guest.
+    argv.extend([
+        # Create QEMU's user-mode network and its host-to-guest TCP forwarding rule.
+        "-netdev", f"user,id=n0,hostfwd=tcp::{port}-:{RUNNER_PORT}",
+        # Attach a virtio network device to the user-mode network defined above.
+        "-device", "virtio-net-pci,netdev=n0",
+    ])
+
+    # Return one reusable command so deploy and bench boot guests identically.
+    return argv
+
+# added helper
+def signal_process_group(pid, sig):
+    """Send one signal to an instance's complete QEMU process group."""
+    try:
+        # Find the group created for QEMU by Popen(start_new_session=True).
+        process_group = os.getpgid(pid)
+
+        # Signal the whole group so QEMU cannot leave helper processes behind.
+        os.killpg(process_group, sig)
+    except OSError:
+        # The instance may have exited between the liveness check and the signal.
+        return False
+
+    # True tells the caller that the signal request reached an existing group.
+    return True
+
+# added helper
+def start_qemu(name, image, arch, port):
+    """Start one QEMU instance and return it only after PING succeeds."""
+    # Ensure the directory for this instance's captured console output exists.
+    os.makedirs(LOG_DIR, exist_ok=True)
+
+    # Give each named instance a predictable log path for debugging failures.
+    log_path = os.path.join(LOG_DIR, f"{name}.log")
+
+    try:
+        # Open in binary mode because Popen writes QEMU's raw output bytes here.
+        log = open(log_path, "wb")
+    except OSError as error:
+        # Report a clean command-line error instead of exposing a Python traceback.
+        print(f"error: cannot open log {log_path}: {error}", file=sys.stderr)
+        return None, log_path
+
+    # Construct the architecture-correct QEMU invocation and forwarding rule.
+    argv = qemu_command(image, arch, port)
+
+    try:
+        # Start QEMU with no terminal input and with all output captured in its log.
+        proc = subprocess.Popen(
+            # Pass the already separated QEMU arguments without invoking a shell.
+            argv,
+            # Store both standard output and standard error in the console log.
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            # Prevent QEMU from inheriting this deployment tool's standard input.
+            stdin=subprocess.DEVNULL,
+            # Create the process group used later by stop and failure cleanup.
+            start_new_session=True,
+        )
+    except OSError as error:
+        # Close the log because no QEMU process inherited its descriptor.
+        log.close()
+
+        # Explain startup failures, such as a missing QEMU executable.
+        print(f"error: cannot start QEMU: {error}", file=sys.stderr)
+        return None, log_path
+
+    # QEMU inherited its own descriptor, so this parent copy can now be closed.
+    log.close()
+
+    # Do not call the instance ready until the runner answers through forwarding.
+    if not wait_ready(port, proc.pid):
+        # Force the entire failed QEMU process group to stop.
+        signal_process_group(proc.pid, signal.SIGKILL)
+
+        try:
+            # Reap this direct child so the deployment tool does not leave a zombie.
+            proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            # A SIGKILLed process should exit promptly; continue cleanly if it does not.
+            pass
+
+        # Point the user to the console output that explains the boot failure.
+        print(f"error: instance did not become ready; see {log_path}",
+              file=sys.stderr)
+        return None, log_path
+
+    # Return the live process and its log only after the PING readiness check passes.
+    return proc, log_path
+
+
+# TODO (implemented): build the unikernel image for the requested architecture.
 def cmd_build(args):
-    """TODO(student) Part I: build the unikernel image. Do this one first.
+    """Run KraftKit, verify that it produced an image, and report its path."""
+    # Refuse to start a build when the required KraftKit command is unavailable.
+    if shutil.which("kraft") is None:
+        # Send the actionable failure message to standard error.
+        print("error: kraft is not installed or not in PATH", file=sys.stderr)
+        return 1
 
-    Do these steps in order:
+    # Use every detected host CPU, while falling back to one if detection fails.
+    jobs = os.cpu_count() or 1
 
-      1. Check that kraft is installed. If shutil.which("kraft") returns None,
-         print an error and return 1.
-      2. Run this command inside the app directory, APP_DIR:
+    # Build the exact noninteractive KraftKit command required by the specification.
+    argv = [
+        # Run the KraftKit command-line tool.
+        "kraft",
+        # Ask KraftKit to compile the application image.
+        "build",
+        # Select QEMU as the platform that will boot the completed image.
+        "--plat", "qemu",
+        # Build for the architecture selected on this command line.
+        "--arch", args.arch,
+        # Reuse the package index installed during VM setup instead of downloading it.
+        "--no-update",
+        # Prevent an unanswered interactive prompt from hanging an automated build.
+        "--no-prompt",
+        # Parallelize compilation across the available host CPUs.
+        "-j", str(jobs),
+    ]
 
-             kraft build --plat qemu --arch <arch> --no-update --no-prompt -j <ncpu>
+    # Run from APP_DIR so KraftKit reads this project's Kraftfile and Makefile.uk.
+    result = subprocess.run(argv, cwd=APP_DIR)
 
-         Pass the command to subprocess.run() as a list of strings, one per
-         word, and set cwd=APP_DIR so it runs inside the app directory:
+    # Propagate a clean failure when KraftKit reports that compilation failed.
+    if result.returncode != 0:
+        # Explain which high-level operation failed without hiding KraftKit's output.
+        print("error: kraft build failed", file=sys.stderr)
+        return 1
 
-             argv = ["kraft", "build", "--plat", "qemu", "--arch", args.arch,
-                     "--no-update", "--no-prompt", "-j", str(os.cpu_count())]
-             result = subprocess.run(argv, cwd=APP_DIR)
+    # Locate the extensionless QEMU image produced for the requested architecture.
+    image = find_image(args.arch)
 
-         args.arch is the architecture from the command line ("x86_64" or
-         "arm64"). Every item must be a string, so convert os.cpu_count() with
-         str().
-      3. If result.returncode is not 0, the build failed: print an error and
-         return 1.
-      4. Find the image with find_image(args.arch). If it returns None, the
-         build produced no image: print an error and return 1.
-      5. Print the image's path and return 0.
+    # A zero build exit without an image is still an unsuccessful build command.
+    if image is None:
+        # Tell the user that the expected build artifact could not be found.
+        print("error: build completed but produced no bootable image", file=sys.stderr)
+        return 1
 
-    Your return value becomes the exit status of `./deploy/ukdeploy.py build`.
-    To check it, run that command: on success, the image is under
-    app/.unikraft/build/. SPEC.md Part I explains why the two flags are needed."""
-    print("TODO: implement build")
-    return 1
+    # Print the artifact path so the user knows exactly what deploy will boot.
+    print(image)
+
+    # Return a successful shell exit status.
+    return 0
 
 
+# TODO (implemented): deploy one named unikernel instance and save its state.
 def cmd_deploy(args):
-    """TODO(student) Part II: start one instance and wait until it is ready.
+    """Choose a name and port, start QEMU, wait for PING, and record the instance."""
+    # Load saved instances and discard entries whose QEMU process has died.
+    state = reap_dead(load_state())
 
-    On any failure below, print an error (to stderr) and return 1.
+    # Persist stale-entry removal even if a later validation step fails.
+    save_state(state)
 
-      1. state = reap_dead(load_state()).
-      2. img = find_image(args.arch). If it is None, tell the user to run
-         `ukdeploy.py build` first.
-      3. Pick the name: args.name, or if it is None, make one up that is not in
-         state["instances"] (e.g. "runner1", "runner2", ...). If the name is
-         already in state["instances"], fail.
-      4. Pick the port. If args.port is given: fail if port_free(args.port) is
-         False, otherwise use it. If not given: use pick_port(state), and fail
-         if it returns None.
-      5. Build the QEMU command as a list of strings. With spec =
-         ARCHES[args.arch]:
+    # Find the image built for the architecture requested by this deployment.
+    image = find_image(args.arch)
 
-             [spec["qemu"], "-kernel", img, "-nographic", "-no-reboot",
-              "-m", "128M", <kvm and cpu>, <extra>,
-              "-netdev", f"user,id=n0,hostfwd=tcp::{port}-:{RUNNER_PORT}",
-              "-device", "virtio-net-pci,netdev=n0"]
+    # Deploy cannot boot anything until the build command has produced an image.
+    if image is None:
+        # Give the user the exact recovery action instead of allowing a traceback.
+        print("error: no image found; run ukdeploy.py build first", file=sys.stderr)
+        return 1
 
-         <kvm and cpu>: if args.arch == host_arch() and
-         os.access("/dev/kvm", os.R_OK | os.W_OK) is True, use
-         "-enable-kvm", "-cpu", spec["cpu"]; otherwise just
-         "-cpu", spec["fallback_cpu"].
-         <extra>: the items in spec.get("extra", []) (arm64 has some).
-      6. Start QEMU with its output going to a log file:
+    # Use the requested name when one was supplied.
+    name = args.name
 
-             os.makedirs(LOG_DIR, exist_ok=True)
-             log_path = os.path.join(LOG_DIR, f"{name}.log")
-             log = open(log_path, "wb")
-             proc = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT,
-                                     stdin=subprocess.DEVNULL,
-                                     start_new_session=True)
+    # Generate the first unused runnerN name when the caller omitted --name.
+    if name is None:
+        # Start generated names at runner1 for predictable list output.
+        number = 1
 
-      7. If wait_ready(port, proc.pid) is False: stop QEMU with
-         os.killpg(os.getpgid(proc.pid), signal.SIGKILL), print the log_path so
-         the user can look, and fail. Do not save it.
-      8. Save it: state["instances"][name] = {"pid": proc.pid, "port": port,
-         "image": img, "log": log_path, "arch": args.arch,
-         "started": time.time()}, then save_state(state).
-      9. Print a line containing the name and `port=<port>`, for example:
-             deployed a  port=9000  pid=12345
-         and return 0.
+        # Continue until the generated name is absent from live saved state.
+        while f"runner{number}" in state["instances"]:
+            # Move to the next candidate name after a collision.
+            number += 1
 
-    bench (Part IV) also boots instances, so you may want to put steps 5 to 7
-    in a helper function that both can call."""
-    print("TODO: implement deploy")
-    return 1
+        # Save the available generated name for the new instance.
+        name = f"runner{number}"
+
+    # Refuse to overwrite the state record for a live instance of the same name.
+    if name in state["instances"]:
+        # Explain the collision and leave the existing instance unchanged.
+        print(f"error: instance {name!r} already exists", file=sys.stderr)
+        return 1
+
+    # Collect ports reserved by the live instances already recorded in state.
+    reserved_ports = {
+        # Read the host forwarding port from each instance record.
+        entry["port"]
+        for entry in state["instances"].values()
+    }
+
+    # Handle an explicitly requested port without silently choosing another one.
+    if args.port is not None:
+        # Reject either a saved reservation or a port currently bound by any process.
+        if args.port in reserved_ports or not port_free(args.port):
+            # Include the exact conflicting port in the command-line error.
+            print(f"error: port {args.port} is already in use", file=sys.stderr)
+            return 1
+
+        # The requested port passed both state and operating-system checks.
+        port = args.port
+    else:
+        # Ask the shared allocator for the first free port in PORT_RANGE.
+        port = pick_port(state)
+
+        # None means every allowed port was reserved or already bound.
+        if port is None:
+            # Tell the user why an automatically assigned port was unavailable.
+            print("error: no free deployment ports are available", file=sys.stderr)
+            return 1
+
+    # Start QEMU and wait until the runner answers PING on the forwarded port.
+    proc, log_path = start_qemu(name, image, args.arch, port)
+
+    # start_qemu already stopped and reported a guest that failed to become ready.
+    if proc is None:
+        return 1
+
+    # Record every value later commands need to list, stop, or inspect this instance.
+    state["instances"][name] = {
+        # Save QEMU's host PID for liveness checks and process-group signals.
+        "pid": proc.pid,
+        # Save the host port forwarded to port 8080 inside the unikernel.
+        "port": port,
+        # Save the exact image path this QEMU process booted.
+        "image": image,
+        # Save the captured console-log path for debugging and grading.
+        "log": log_path,
+        # Save the guest architecture used to select QEMU and CPU arguments.
+        "arch": args.arch,
+        # Save the host wall-clock deployment time for later inspection.
+        "started": time.time(),
+    }
+
+    # Atomically persist the new instance so future tool invocations can manage it.
+    save_state(state)
+
+    # Print the name, required port field, and QEMU PID for the user and tests.
+    print(f"deployed {name}  port={port}  pid={proc.pid}")
+
+    # Return success only after state has been saved for a PING-ready instance.
+    return 0
 
 
+# TODO (implemented): benchmark cold-boot readiness for fresh instances.
 def cmd_bench(args):
-    """TODO(student) Part IV: measure how long a new instance takes to become
-    ready.
+    """Boot temporary instances, time readiness, stop them, and print statistics."""
+    # A benchmark needs at least one run to calculate a median and maximum.
+    if args.count <= 0:
+        # Reject invalid counts cleanly instead of indexing an empty result list.
+        print("error: --count must be greater than zero", file=sys.stderr)
+        return 1
 
-    On any failure below, print an error (to stderr) and return 1.
+    # Locate the image whose cold-start time and size will be measured.
+    image = find_image(args.arch)
 
-      1. img = find_image(args.arch). If it is None, tell the user to run
-         `ukdeploy.py build` first.
-      2. Repeat args.count times:
-           - pick a port with pick_port(load_state());
-           - note start = time.time(), start QEMU and wait_ready() exactly as
-             cmd_deploy does (steps 5 to 7), then record time.time() - start;
-           - stop that QEMU: os.killpg(os.getpgid(proc.pid), signal.SIGKILL),
-             then proc.wait().
-         Do not save these instances in the state.
-      3. Print these lines, using os.path.getsize(img) for the size and the
-         sorted times for the median and maximum, then return 0:
+    # Benchmarking cannot proceed without a bootable image.
+    if image is None:
+        # Give the same actionable recovery message as deploy.
+        print("error: no image found; run ukdeploy.py build first", file=sys.stderr)
+        return 1
 
-             image      <path to the image>
-             image_size <size in bytes>
-             runs       <args.count>
-             ready_p50  <median time, in seconds>
-             ready_max  <longest time, in seconds>
+    # Remove dead entries before considering which benchmark port is available.
+    state = reap_dead(load_state())
 
-    If you put cmd_deploy's steps 5 to 7 in a helper function, call it here
-    instead of copying them."""
-    print("TODO: implement bench")
-    return 1
+    # Hold one elapsed readiness time for every requested cold boot.
+    ready_times = []
+
+    # Boot, measure, and stop one fresh unikernel per requested run.
+    for run_index in range(args.count):
+        # Select a port not used by a saved instance or another host listener.
+        port = pick_port(state)
+
+        # Stop cleanly if no benchmark instance can receive a forwarded port.
+        if port is None:
+            # Explain that the configured range is exhausted.
+            print("error: no free deployment ports are available", file=sys.stderr)
+            return 1
+
+        # Give this temporary run a unique log name without adding it to state.
+        name = f"bench-{os.getpid()}-{run_index + 1}"
+
+        # Start timing immediately before the shared QEMU launch operation.
+        started = time.time()
+
+        # Boot with the same command and readiness test used by normal deploys.
+        proc, _log_path = start_qemu(name, image, args.arch, port)
+
+        # Abort the benchmark if this run never reached a PING-ready state.
+        if proc is None:
+            return 1
+
+        # Record total host-observed time from launch through the first PONG.
+        ready_times.append(time.time() - started)
+
+        # Force-stop the temporary instance so the next run is another cold boot.
+        signal_process_group(proc.pid, signal.SIGKILL)
+
+        try:
+            # Reap the direct QEMU child and release its process resources and port.
+            proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            # Report the unlikely cleanup failure rather than starting another run.
+            print("error: benchmark QEMU did not stop", file=sys.stderr)
+            return 1
+
+    # Sort elapsed times so the middle value or pair represents the median.
+    ordered_times = sorted(ready_times)
+
+    # Save the middle index shared by odd and even result counts.
+    middle = len(ordered_times) // 2
+
+    # An odd count has one exact middle observation.
+    if len(ordered_times) % 2:
+        # Select the single middle value.
+        ready_p50 = ordered_times[middle]
+    else:
+        # An even count uses the average of the two central observations.
+        ready_p50 = (ordered_times[middle - 1] + ordered_times[middle]) / 2.0
+
+    # Print the exact image whose size and boot performance were measured.
+    print(f"image      {image}")
+
+    # Read and print the image's current size in bytes.
+    print(f"image_size {os.path.getsize(image)}")
+
+    # Print the number of successful fresh boots included in the statistics.
+    print(f"runs       {args.count}")
+
+    # Print the median host-observed time with stable decimal precision.
+    print(f"ready_p50  {ready_p50:.6f}")
+
+    # Print the slowest host-observed ready time from this benchmark.
+    print(f"ready_max  {max(ordered_times):.6f}")
+
+    # Return success after every run was measured and stopped.
+    return 0
 
 
+# TODO (implemented): list saved live instances in text or JSON form.
 def cmd_list(args):
-    """TODO(student) Part II: show the running instances.
+    """Discard dead records, check each runner, and print the current instances."""
+    # Load state and remove records whose saved QEMU process has exited.
+    state = reap_dead(load_state())
 
-      1. state = reap_dead(load_state()), then save_state(state), so removed
-         instances stay removed.
-      2. If state["instances"] is empty, print "no instances" and return 0.
-      3. Otherwise print one line per instance: its name, port, pid, whether
-         ping(port) is True right now, and its log path. Return 0.
+    # Persist cleanup so stale names and ports remain available to later commands.
+    save_state(state)
 
-    Part IV: if args.json is True, then right after step 1 print a JSON list
-    and return 0 (an empty list, [], if there are no instances). Build it from
-    state["instances"], one dict per instance with its name added, and print it
-    with json.dumps():
+    # Produce machine-readable output before applying the human empty-state format.
+    if args.json:
+        # Add each dictionary key as the explicit name field in its JSON object.
+        instances = [
+            # Preserve every saved field while adding the instance's state key.
+            {"name": name, **entry}
+            for name, entry in state["instances"].items()
+        ]
 
-        [{"name": name, **entry} for name, entry in state["instances"].items()]
-    """
-    print("TODO: implement list")
-    return 1
+        # Serialize the list; an empty state naturally becomes the required [].
+        print(json.dumps(instances))
+        return 0
+
+    # Human-readable output uses a sentence when there is nothing to display.
+    if not state["instances"]:
+        # Print the exact empty-state wording required by the specification.
+        print("no instances")
+        return 0
+
+    # Print one current status line for every saved live QEMU instance.
+    for name, entry in state["instances"].items():
+        # Ask the runner now instead of assuming a live QEMU process means readiness.
+        ready = ping(entry["port"])
+
+        # Show the identifiers, current PING result, and console-log location.
+        print(
+            f"{name}  port={entry['port']}  pid={entry['pid']}  "
+            f"ready={'yes' if ready else 'no'}  log={entry['log']}"
+        )
+
+    # Listing succeeds even if a live QEMU process is temporarily not PING-ready.
+    return 0
 
 
+# TODO (implemented): stop one saved instance or every saved instance.
 def cmd_stop(args):
-    """TODO(student) Part II: stop one instance (args.name) or all (args.all).
+    """Terminate selected QEMU process groups and remove their state records."""
+    # Load the records that identify the QEMU process groups to stop.
+    state = load_state()
 
-      1. state = load_state().
-      2. Decide which instances to stop: all of state["instances"] if args.all;
-         otherwise just args.name. If neither is given, or args.name is not in
-         state["instances"], print an error and return 1.
-      3. For each one, with pid = its "pid":
-           - os.killpg(os.getpgid(pid), signal.SIGTERM);
-           - wait up to about 2 seconds, checking alive(pid) every 0.1 s;
-           - if it is still alive, os.killpg(os.getpgid(pid), signal.SIGKILL).
-         Wrap each killpg/getpgid call in try/except OSError: the process may
-         have exited already.
-      4. Delete each stopped instance from state["instances"], then
-         save_state(state). Return 0."""
-    print("TODO: implement stop")
-    return 1
+    # --all selects a snapshot of every currently recorded instance name.
+    if args.all:
+        # Copy the keys because each selected entry is deleted later.
+        names = list(state["instances"])
+    else:
+        # A single-instance stop requires a positional name.
+        if args.name is None:
+            # Explain the two valid ways to select stop targets.
+            print("error: specify an instance name or --all", file=sys.stderr)
+            return 1
+
+        # Refuse an unknown name without changing any other saved instance.
+        if args.name not in state["instances"]:
+            # Include the missing name in the command-line error.
+            print(f"error: instance {args.name!r} does not exist", file=sys.stderr)
+            return 1
+
+        # Put the one selected name into the same loop shape used by --all.
+        names = [args.name]
+
+    # Stop each selected QEMU process group and remove its state entry.
+    for name in names:
+        # Read QEMU's host PID from this instance's saved state record.
+        pid = state["instances"][name]["pid"]
+
+        # Request graceful termination for QEMU and every process in its group.
+        signal_process_group(pid, signal.SIGTERM)
+
+        # Give the process about two seconds to honor SIGTERM.
+        deadline = time.time() + 2.0
+
+        # Poll briefly because this command may not be the QEMU process's parent.
+        while alive(pid) and time.time() < deadline:
+            # Avoid consuming CPU while waiting for process shutdown.
+            time.sleep(0.1)
+
+        # Escalate only when the process survived the graceful shutdown window.
+        if alive(pid):
+            # SIGKILL guarantees that a stuck instance cannot keep its port or memory.
+            signal_process_group(pid, signal.SIGKILL)
+
+        # Remove the record so its name and host port can be reused.
+        del state["instances"][name]
+
+    # Atomically save the state after all selected records have been removed.
+    save_state(state)
+
+    # Return success, including when --all was used with an already empty state.
+    return 0
 
 
 # ---- command line (PROVIDED) ---------------------------------------------

@@ -1,20 +1,16 @@
-### Config.uk: kconfig options for this app.  *** YOU IMPLEMENT ***
+### Config.uk: Kconfig option for the statistics library.
 #
-# Declaring an option here lets Makefile.uk compile your library's source only
-# when the option is true.
-#
-# See SPEC.md Part III.
-#
-# TODO(student): declare a boolean option for your statistics library, on by
-# default:
-#
-#     config APPRUNNER_STATS
-#         bool "Collect unikernel statistics (boot time, invocations)"
-#         default y
-#         help
-#           Builds libukstats, which records when boot finished, counts the
-#           invocations the runner serves, and answers INFO from inside the
-#           unikernel.
-#
-# Your Makefile.uk then guards the library's sources with
-# $(CONFIG_APPRUNNER_STATS).
+# This option lets Makefile.uk include the library only when it is enabled.
+
+# TODO (implemented): declare the statistics-library build option.
+# Define the switch that controls whether the statistics library is compiled.
+config APPRUNNER_STATS
+	# Show this description when someone configures the application.
+	bool "Collect unikernel statistics (boot time, invocations)"
+	# Include the library unless a builder explicitly disables it.
+	default y
+	# Explain what enabling this option adds to the image.
+	help
+	  Builds libukstats, which records when boot finished, counts the
+	  invocations the runner serves, and answers INFO from inside the
+	  unikernel.
