@@ -4,18 +4,17 @@
 # Both are compiled INTO the image from source, the same way as any Unikraft
 # library.
 #
+# See SPEC.md Part I (TODO A) and Part III (TODO B).
+#
 # TODO A (implemented): register runner.c as the application source.
-# Register the runner application as a source library in the Unikraft build.
 $(eval $(call addlib,apprunner))
 
 # Compile the provided runner directly from the neighboring runner directory.
 APPRUNNER_SRCS-y += $(APPRUNNER_BASE)/../runner/runner.c
 
 # TODO B (implemented): register the optional statistics library.
-# Register the statistics code as its own library in the same image.
 $(eval $(call addlib,libukstats))
 
-# Save the directory containing the statistics library's source file.
 LIBUKSTATS_BASE := $(APPRUNNER_BASE)/libukstats
 
 # Compile ukstats.c only when Config.uk enables APPRUNNER_STATS.

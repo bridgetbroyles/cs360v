@@ -10,18 +10,13 @@ name: runner
 # See SPEC.md Part I. Build with:  ./deploy/ukdeploy.py build
 
 # TODO (implemented): select the Unikraft core and required kernel options.
-# Select the stable Unikraft kernel as the core of the bootable image.
 unikraft:
-  # Use the stable package version required by the specification.
   version: stable
-  # Enable the C library and cooperative scheduler needed by the application.
   kconfig:
-    # Provide the small C standard-library implementation used by runner.c.
     - CONFIG_LIBNOLIBC=y
-    # Include Unikraft's general scheduling support.
     - CONFIG_LIBUKSCHED=y
-    # Use the cooperative scheduler required by lwIP's threaded mode.
     - CONFIG_LIBUKSCHEDCOOP=y
+
 targets:
   - architecture: x86_64
     platform: qemu
@@ -29,27 +24,15 @@ targets:
     platform: qemu
 
 # TODO (implemented): add lwIP and enable the required networking options.
-# Add the TCP/IP library that provides the socket API used by runner.c.
 libraries:
-  # Use lwIP as the unikernel's network stack.
   lwip:
-    # Use the stable lwIP package version required by the specification.
     version: stable
-    # Enable the network-device, TCP, socket, IPv4, and DHCP features we use.
     kconfig:
-      # Connect lwIP to Unikraft's network-device interface.
       - CONFIG_LWIP_UKNETDEV=y
-      # Include TCP support for the runner's listening socket.
       - CONFIG_LWIP_TCP=y
-      # Allow lwIP to run its required networking threads.
       - CONFIG_LWIP_THREADS=y
-      # Provide socket(), bind(), listen(), accept(), read(), and write().
       - CONFIG_LWIP_SOCKET=y
-      # Automatically create and start the available network interface.
       - CONFIG_LWIP_AUTOIFACE=y
-      # Include IPv4, which the QEMU user network and runner use.
       - CONFIG_LWIP_IPV4=y
-      # Obtain the unikernel's address from QEMU's built-in DHCP server.
       - CONFIG_LWIP_DHCP=y
-      # Disable ppoll support because this application does not need it.
       - CONFIG_LWIP_SOCKET_PPOLL=n

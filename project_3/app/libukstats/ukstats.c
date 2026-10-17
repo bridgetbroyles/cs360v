@@ -1,25 +1,22 @@
 /* ukstats.c: statistics library compiled into the runner unikernel.
  *
- * It records boot time, counts successful RUN commands, and answers INFO.
+ * It implements three things from SPEC.md Part III:
+ *
+ *   1. a boot hook, which runs during boot and records when boot finished;
+ *   2. runner_on_invoke(), which counts invocations;
+ *   3. runner_platform_info(), which answers the runner's INFO command.
+ *
  * runner.c supplies weak defaults that these definitions replace.
  */
 #include <stdio.h>
 
-/* include the required Unikraft APIs. */
-/* Provide uk_late_initcall(), which registers a function to run during boot. */
+/* TODO (implemented): include the required Unikraft APIs. */
 #include <uk/init.h>
-
-/* Provide access to Unikraft's default memory allocator and free-memory count. */
 #include <uk/alloc.h>
-
-/* Provide __nsec and the monotonic clock used for boot and uptime measurements. */
 #include <uk/plat/time.h>
 
-/* store boot time and invocation count. */
-/* Save the boot-hook timestamp in nanoseconds so INFO can report it later. */
+/* TODO (implemented): store boot time and invocation count. */
 static __nsec boot_ns;
-
-/* Count successful RUN commands handled since this unikernel booted. */
 static unsigned long invocations;
 
 /* TODO 1 (implemented): record and print boot completion time. */
@@ -30,14 +27,11 @@ static unsigned long invocations;
  */
 static int ukstats_boot_finished(void)
 {
-	/* Read the number of nanoseconds elapsed since this unikernel started. */
 	boot_ns = ukplat_monotonic_clock();
 
-	/* Convert nanoseconds to milliseconds and print the required log record. */
 	printf("1 unikernel booted in %lu ms\n",
 	       (unsigned long)(boot_ns / 1000000));
 
-	/* Tell Unikraft that the boot hook completed successfully. */
 	return 0;
 }
 
@@ -51,10 +45,8 @@ uk_late_initcall(ukstats_boot_finished, 0);
  */
 void runner_on_invoke(const char *fn)
 {
-	/* Mark the parameter intentionally unused so strict builds do not warn. */
+	/* The project tracks only the total count, not counts by function name. */
 	(void)fn;
-
-	/* Record one more successful function invocation. */
 	invocations++;
 }
 
@@ -66,7 +58,6 @@ void runner_on_invoke(const char *fn)
  */
 int runner_platform_info(char *out, size_t n)
 {
-	/* Ask Unikraft for the allocator that manages the image's normal memory. */
 	struct uk_alloc *allocator = uk_alloc_get_default();
 
 	/* Report -1 if no allocator exists; otherwise ask it for available bytes. */
@@ -74,19 +65,15 @@ int runner_platform_info(char *out, size_t n)
 		? -1L
 		: (long)uk_alloc_availmem(allocator);
 
-	/* Read the current monotonic time and convert nanoseconds to milliseconds. */
 	unsigned long uptime_ms =
 		(unsigned long)(ukplat_monotonic_clock() / 1000000);
 
-	/* Convert the boot timestamp saved by the hook to milliseconds. */
 	unsigned long boot_ms = (unsigned long)(boot_ns / 1000000);
 
-	/* Write all required fields without writing beyond the supplied buffer. */
 	snprintf(out, n,
 		 "platform=unikraft freemem=%ld uptime_ms=%lu "
 		 "boot_ms=%lu invocations=%lu",
 		 free_memory, uptime_ms, boot_ms, invocations);
 
-	/* Tell runner.c that the INFO response was produced successfully. */
 	return 0;
 }
